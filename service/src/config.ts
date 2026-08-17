@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -65,20 +65,44 @@ export function defaultDataDir(): string {
   }
 }
 
+/** User-editable files only (`config.toml`). */
+export function defaultConfigDir(): string {
+  if (process.env.DOSSIER_CONFIG) return process.env.DOSSIER_CONFIG;
+  const home = homedir();
+  switch (platform()) {
+    case "win32":
+      return join(process.env.APPDATA || join(home, "AppData", "Roaming"), "dossier");
+    default:
+      return join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "dossier");
+  }
+}
+
 export interface Paths {
   dataDir: string;
+  configDir: string;
   configPath: string;
   tokenPath: string;
   dbPath: string;
 }
 
-export function pathsFor(dataDir = defaultDataDir()): Paths {
+export function pathsFor(opts: { dataDir?: string; configDir?: string } = {}): Paths {
+  const dataDir = opts.dataDir ?? defaultDataDir();
+  const configDir = opts.configDir ?? defaultConfigDir();
   return {
     dataDir,
-    configPath: join(dataDir, "config.toml"),
+    configDir,
+    configPath: join(configDir, "config.toml"),
     tokenPath: join(dataDir, "token"),
     dbPath: join(dataDir, "dossier.sqlite"),
   };
+}
+
+/** Move a v0.1-era `share/dossier/config.toml` into the config dir once. */
+export function migrateLegacyConfig(paths: Paths): void {
+  const legacy = join(paths.dataDir, "config.toml");
+  if (existsSync(paths.configPath) || !existsSync(legacy)) return;
+  ensureDataDir(paths.configDir);
+  renameSync(legacy, paths.configPath);
 }
 
 export function ensureDataDir(dataDir: string): void {

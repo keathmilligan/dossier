@@ -9,9 +9,10 @@ Chromium only (Chrome, Brave, Edge, Chromium). Firefox is out of scope for v0.1.
 ## How it works
 
 ```
-Browser extension  →  dossierd (127.0.0.1)  →  SQLite in ~/.local/share/dossier/
-                              ↓
-                         Ollama (optional for capture; required for chat, judge, draft)
+Browser extension  →  dossierd (127.0.0.1)
+                         ├─ ~/.config/dossier/config.toml
+                         ├─ ~/.local/share/dossier/  (token, SQLite)
+                         └─ Ollama (optional for capture; required for chat, judge, draft)
 ```
 
 * **Session** — you hit record for one or more topics. Higher capture. Banks, mail, IdPs, incognito, and password fields are still blocked.
@@ -48,14 +49,16 @@ On first run this creates:
 
 | Path | Purpose |
 |------|---------|
-| `~/.local/share/dossier/` | Data directory (`0700`) |
-| `config.toml` | Listen address, models, capture thresholds |
-| `token` | Per-install bearer token (`0600`). Never logged |
-| `dossier.sqlite` | Topics, items, filings |
+| `~/.config/dossier/config.toml` | User-editable settings (listen, models, thresholds) |
+| `~/.local/share/dossier/` | Runtime data (`0700`) |
+| `~/.local/share/dossier/token` | Per-install bearer token (`0600`). Never logged |
+| `~/.local/share/dossier/dossier.sqlite` | Topics, items, filings |
+
+Startup logs those absolute paths. A `config.toml` left in the share dir from an earlier build is moved once. Override with `DOSSIER_CONFIG` and `DOSSIER_HOME`.
+
+On macOS the data dir is `~/Library/Application Support/dossier/` and config is still `~/.config/dossier/`. On Windows, `%APPDATA%\dossier\config.toml` and `%LOCALAPPDATA%\dossier\` for data.
 
 The server binds **`127.0.0.1:18765` only**. It will not listen on `0.0.0.0`.
-
-On macOS the data dir is `~/Library/Application Support/dossier/`. On Windows it is `%LOCALAPPDATA%\dossier\`.
 
 ### 2. Language model (optional, recommended)
 
@@ -120,7 +123,7 @@ Incognito is never captured. Mail, banks, health, IdPs, and password managers ar
 
 ## Configuration
 
-Edit `~/.local/share/dossier/config.toml` (created on first start):
+Edit `~/.config/dossier/config.toml` (created on first start):
 
 ```toml
 listen = "127.0.0.1"

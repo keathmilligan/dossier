@@ -3,9 +3,9 @@
  * Chrome native-messaging host. Length-prefixed JSON on stdin/stdout.
  * Commands: ping, get_token, ensure_running.
  */
-import { defaultDataDir, loadOrCreateToken, pathsFor, ensureDataDir } from "./config.js";
+import { loadOrCreateToken, pathsFor, ensureDataDir } from "./config.js";
 
-const paths = pathsFor(defaultDataDir());
+const paths = pathsFor();
 ensureDataDir(paths.dataDir);
 const token = loadOrCreateToken(paths.tokenPath);
 

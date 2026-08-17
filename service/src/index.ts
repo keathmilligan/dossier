@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-import { bindHost, defaultDataDir, ensureDataDir, loadOrCreateConfig, loadOrCreateToken, pathsFor } from "./config.js";
+import {
+  bindHost,
+  ensureDataDir,
+  loadOrCreateConfig,
+  loadOrCreateToken,
+  migrateLegacyConfig,
+  pathsFor,
+} from "./config.js";
 import { openDb, getMeta, setMeta } from "./db.js";
 import { OllamaClient } from "./ollama.js";
 import { buildApp } from "./app.js";
@@ -7,8 +14,10 @@ import { processQueue } from "./jobs.js";
 import type { AppContext } from "./context.js";
 
 async function main(): Promise<void> {
-  const paths = pathsFor(defaultDataDir());
+  const paths = pathsFor();
   ensureDataDir(paths.dataDir);
+  ensureDataDir(paths.configDir);
+  migrateLegacyConfig(paths);
   const config = loadOrCreateConfig(paths.configPath);
   const token = loadOrCreateToken(paths.tokenPath);
   const db = openDb(paths.dbPath);
@@ -40,6 +49,9 @@ async function main(): Promise<void> {
 
   await app.listen({ host, port });
   console.log(`dossierd listening on http://${host}:${port}`);
+  console.log(`config    ${paths.configPath}`);
+  console.log(`data dir  ${paths.dataDir}`);
+  console.log(`database  ${paths.dbPath}`);
 }
 
 main().catch((err) => {
