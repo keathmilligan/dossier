@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dossier</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Dossier</h1>
+      <span id="health" class="status"></span>
+    </header>
+    <main>
+      <section id="topics-view">
+        <h2>Topics</h2>
+        <ul id="topic-list" class="list"></ul>
+        <div class="row">
+          <input id="new-title" type="text" placeholder="New topic title" />
+          <button id="create" class="primary">Create</button>
+        </div>
+      </section>
+      <section id="topic-view" hidden>
+        <div class="row">
+          <button id="back">← Topics</button>
+          <strong id="topic-title"></strong>
+        </div>
+        <div class="tabs" id="tabs">
+          <button data-tab="chat" class="on">Chat</button>
+          <button data-tab="queue">Queue</button>
+          <button data-tab="brief">Brief</button>
+          <button data-tab="policy">Policy</button>
+          <button data-tab="rejected">Rejected</button>
+        </div>
+        <div id="tab-chat">
+          <div id="chat-log"></div>
+          <textarea id="chat-input" placeholder="Describe the topic and what should get in…"></textarea>
+          <button id="chat-send" class="primary">Send</button>
+          <div id="proposal" hidden>
+            <h2>Policy proposal</h2>
+            <pre id="proposal-diff" class="yaml"></pre>
+            <button id="accept-policy" class="primary">Accept policy</button>
+          </div>
+          <div id="structure" hidden>
+            <h2>Outline plan</h2>
+            <pre id="structure-plan"></pre>
+            <button id="apply-structure" class="primary">Apply structure</button>
+          </div>
+        </div>
+        <div id="tab-queue" hidden>
+          <p class="status">j/k move · enter keep · x reject · 1–9 file to section</p>
+          <ul id="queue" class="list"></ul>
+        </div>
+        <div id="tab-brief" hidden>
+          <div class="row">
+            <button id="export">Export Markdown</button>
+          </div>
+          <pre id="brief" class="brief"></pre>
+        </div>
+        <div id="tab-policy" hidden>
+          <pre id="policy-yaml" class="yaml"></pre>
+          <p class="status">Edit via chat, or paste YAML below and propose.</p>
+          <textarea id="policy-edit"></textarea>
+          <button id="propose-yaml">Propose YAML</button>
+          <div id="watch-box" hidden>
+            <p>Enable watching for these hosts:</p>
+            <ul id="watch-hosts"></ul>
+            <button id="enable-watch" class="primary">Enable watching</button>
+          </div>
+        </div>
+        <div id="tab-rejected" hidden>
+          <ul id="rejected" class="list"></ul>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./panel.ts"></script>
+  </body>
+</html>

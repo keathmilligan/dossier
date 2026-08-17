@@ -1,0 +1,9 @@
+{
+  "name": "com.dossier.native",
+  "description": "Dossier native messaging host (template). Run `npm run install-host --prefix service` after building the service to install a copy with an absolute wrapper path.",
+  "path": "/ABS/PATH/TO/dossier/native/dossier-native.sh",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://nohjgllifaeekjbodpjlkacopbnflhco/"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "dossierd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Dossier HTTP service",
+  "bin": {
+    "dossierd": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "native": "node dist/native.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "install-host": "tsx src/install-host.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "diff": "^7.0.0",
+    "fastify": "^5.3.3",
+    "smol-toml": "^1.3.1",
+    "ulid": "^2.3.0",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/diff": "^7.0.2",
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

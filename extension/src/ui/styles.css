@@ -1,0 +1,45 @@
+:root {
+  color-scheme: dark;
+  --bg: #1b1d21;
+  --fg: #e8eaed;
+  --muted: #9aa0a6;
+  --accent: #8ab4f8;
+  --danger: #f28b82;
+  --ok: #81c995;
+  --card: #2a2d32;
+  --border: #3c4043;
+  font: 13px/1.45 system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+body { min-width: 320px; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+h1 { font-size: 14px; margin: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 16px 0 6px; }
+main { padding: 12px; }
+button, select, input, textarea {
+  font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+}
+button.primary { background: var(--accent); color: #202124; border: 0; font-weight: 600; }
+button.danger { color: var(--danger); }
+button + button { margin-left: 6px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.status { font-size: 12px; color: var(--muted); }
+.status.ok { color: var(--ok); }
+.status.bad { color: var(--danger); }
+.badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: var(--card); }
+.list { list-style: none; padding: 0; margin: 0; }
+.list li { padding: 8px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
+.list li.active { border-color: var(--accent); }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+.tabs button { padding: 4px 8px; }
+.tabs button.on { background: var(--accent); color: #202124; border: 0; }
+.msg { margin: 8px 0; }
+.msg.user { color: var(--accent); }
+.msg.assistant { white-space: pre-wrap; }
+pre, .yaml, .brief { white-space: pre-wrap; background: var(--card); padding: 8px; border-radius: 6px; overflow: auto; max-height: 240px; }
+textarea { width: 100%; min-height: 72px; }
+input[type="text"] { width: 100%; }
+.warn { background: #3c2f12; color: #fdd663; padding: 8px; border-radius: 6px; }
+.snippet { color: var(--muted); font-size: 12px; max-height: 4.2em; overflow: hidden; }
+label.chk { display: flex; gap: 6px; align-items: center; margin: 4px 0; }

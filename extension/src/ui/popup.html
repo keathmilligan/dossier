@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dossier</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Dossier</h1>
+      <span id="health" class="status">checking…</span>
+    </header>
+    <main>
+      <p id="first-run" class="warn" hidden>
+        Dossier stores pages you file on this machine. It does not send page text anywhere except the LLM you configured (default: Ollama on this computer).
+      </p>
+      <div id="token-box" hidden>
+        <p class="status">Native host unavailable. Paste the token from <code>~/.local/share/dossier/token</code>.</p>
+        <input id="token" type="text" autocomplete="off" />
+        <button id="save-token" class="primary">Save token</button>
+      </div>
+      <div class="row" style="margin: 10px 0">
+        <button id="pause">Pause</button>
+        <button id="resume">Resume</button>
+        <button id="pin" class="primary">Pin this page</button>
+      </div>
+      <h2>Session</h2>
+      <div id="topics"></div>
+      <div class="row" style="margin-top: 8px">
+        <button id="start">Start session</button>
+        <button id="stop">Stop</button>
+        <button id="panel">Open side panel</button>
+      </div>
+      <p id="msg" class="status"></p>
+    </main>
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>

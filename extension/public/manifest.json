@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Dossier",
+  "version": "0.1.0",
+  "description": "Topic-scoped research capture. Local-first.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqMqhYESsEhb0OUW+XKW3AQXX0UXrMbKqz7mpDupBk4mwdLk+508vB003qmqUpxfK1+L1DajpBPU8aNzcMAS4bDCbaLHmvB4/Q5ksxHMNjXSW8/k3l3rkVGYy8gw60ComsyX8eVl1yUEtvbSHSp3G1xlagb2YpGTg5uHf3eyR9iBUSO/8eN+tQ6M6JKyBZmyVfRgxuW+6xVJFOx4cEObLK1M9+UghDxiyw04hHESmTc4oV0eargpaIiFYUBCccJdL/5gKYPfnAqcgPGJ0TmPgc0iBlwei1PhN/jTd3eAkH6SU1eli6vwClksnC8wN71uv0OzpTGS9+cZtJ9JwuLWb1QIDAQAB",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "nativeMessaging",
+    "contextMenus",
+    "sidePanel",
+    "scripting",
+    "webNavigation"
+  ],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["http://127.0.0.1:18765/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": {
+    "default_popup": "src/ui/popup.html",
+    "default_title": "Dossier",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "side_panel": { "default_path": "src/ui/panel.html" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

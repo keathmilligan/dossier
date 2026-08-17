@@ -1,0 +1,10 @@
+{
+  "name": "dossier",
+  "private": true,
+  "description": "Topic-scoped research capture for the browser",
+  "scripts": {
+    "test": "npm test --prefix service && npm test --prefix extension",
+    "typecheck": "npm run typecheck --prefix service && npm run typecheck --prefix extension",
+    "build": "npm run build --prefix service && npm run build --prefix extension"
+  }
+}
