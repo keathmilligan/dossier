@@ -2,7 +2,7 @@ import type { AppContext } from "./context.js";
 import type { ChatKind, StructurePlanNode } from "./models.js";
 import { badRequest, llmUnavailable, notFound } from "./errors.js";
 import { newId, nowIso } from "./ids.js";
-import { extractYamlFence, parsePolicyYaml, policyDiff } from "./policy.js";
+import { extractYamlFence, formatPolicyYaml, parsePolicyYaml, policyDiff, yamlFromToolArg } from "./policy.js";
 import { PROMPT_POLICY } from "./prompts.js";
 import { renderBrief } from "./brief.js";
 import { acceptedPolicy, getTopic } from "./store.js";
@@ -159,9 +159,12 @@ function runTool(
   args: Record<string, unknown>,
 ): { content: string; proposal?: { id: string; yaml_text: string; diff_text: string }; structure_plan?: StructurePlanNode[] } {
   if (name === "propose_policy") {
-    const yaml = String(args.yaml ?? "");
-    const proposal = createProposal(ctx, topicId, threadId, yaml);
-    return { content: proposal.diff_text, proposal };
+    try {
+      const proposal = createProposal(ctx, topicId, threadId, yamlFromToolArg(args.yaml));
+      return { content: proposal.diff_text, proposal };
+    } catch (err) {
+      return { content: `propose_policy failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
   if (name === "propose_structure") {
     const nodes = (Array.isArray(args.nodes) ? args.nodes : []) as StructurePlanNode[];
@@ -188,14 +191,14 @@ export function createProposal(
   threadId: string | null,
   yamlText: string,
 ): { id: string; yaml_text: string; diff_text: string } {
-  parsePolicyYaml(yamlText);
+  const yaml = formatPolicyYaml(parsePolicyYaml(yamlText));
   const accepted = acceptedPolicy(ctx.db, topicId);
-  const diffText = policyDiff(accepted?.yaml_text ?? null, yamlText);
+  const diffText = policyDiff(accepted?.yaml_text ?? null, yaml);
   const id = newId();
   ctx.db
     .prepare(
       "INSERT INTO policy_proposals(id, topic_id, yaml_text, diff_text, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .run(id, topicId, yamlText, diffText, threadId, nowIso());
-  return { id, yaml_text: yamlText, diff_text: diffText };
+    .run(id, topicId, yaml, diffText, threadId, nowIso());
+  return { id, yaml_text: yaml, diff_text: diffText };
 }

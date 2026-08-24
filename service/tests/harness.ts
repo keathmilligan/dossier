@@ -10,6 +10,7 @@ import type { ChatResult } from "../src/models.js";
 import type { ChatMessage, LlmClient, ToolSpec } from "../src/ollama.js";
 import { hashEmbed } from "../src/embeddings.js";
 import { processQueue } from "../src/jobs.js";
+import { createLogger } from "../src/logger.js";
 
 export const TOKEN = "t".repeat(64);
 export const EXT_ORIGIN = "chrome-extension://nohjgllifaeekjbodpjlkacopbnflhco";
@@ -55,6 +56,7 @@ export function makeCtx(llm: LlmClient = mockLlm()): AppContext {
     token: TOKEN,
     llm,
     paused: { value: false },
+    logger: createLogger(null, { silent: true }),
   };
 }
 

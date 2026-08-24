@@ -1,6 +1,6 @@
 export type TopicStatus = "watching" | "active" | "drafting" | "shelved";
 export type NodeKind = "inbox" | "section";
-export type ItemSource = "session" | "watching" | "manual" | "pin";
+export type ItemSource = "watching" | "manual" | "pin";
 export type ItemOrigin = "public" | "private";
 export type FilingState = "inbox" | "proposed" | "filed" | "rejected" | "related";
 export type Verdict = "keep" | "demote" | "reject" | "reread";
@@ -17,9 +17,15 @@ export interface Topic {
   status: TopicStatus;
   venues_json: string;
   auto_accept_confidence: number;
-  watching_confirmed: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface TopicHost {
+  id: string;
+  topic_id: string;
+  host: string;
+  added_at: string;
 }
 
 export interface Policy {
@@ -68,7 +74,6 @@ export interface Item {
   captured_at: string;
   dwell_ms: number;
   source: ItemSource;
-  session_id: string | null;
   readable_text: string | null;
   highlight_text: string | null;
   origin: ItemOrigin;
@@ -87,21 +92,12 @@ export interface Filing {
   verdict: Verdict | null;
 }
 
-export interface SessionRow {
-  id: string;
-  topic_ids: string;
-  started_at: string;
-  ended_at: string | null;
-  paused: number;
-}
-
 export interface CaptureBody {
   url: string;
   title?: string;
   referrer?: string | null;
   dwell_ms?: number;
   source: ItemSource;
-  session_id?: string | null;
   topic_ids?: string[];
   readable_text?: string | null;
   highlight_text?: string | null;

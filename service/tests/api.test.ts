@@ -2,9 +2,15 @@ import { describe, expect, it } from "vitest";
 import { api, authHeaders, drain, makeApp, makeCtx, mockLlm, SAMPLE_POLICY, TOKEN } from "./harness.js";
 import { createTopic } from "../src/topics.js";
 import { createProposal } from "../src/chat.js";
-import { acceptPolicy, applyStructure, applyVerdict } from "../src/topics.js";
+import {
+  acceptPolicy,
+  addTopicHost,
+  applyStructure,
+  applyVerdict,
+  removeTopicHost,
+} from "../src/topics.js";
 import { ingestCapture } from "../src/capture.js";
-import { countItems, inboxNode, listNodes } from "../src/store.js";
+import { countItems, getTopic, inboxNode, listNodes, listTopicHosts } from "../src/store.js";
 import { encodeVec, hashEmbed } from "../src/embeddings.js";
 import { newId } from "../src/ids.js";
 
@@ -57,8 +63,8 @@ describe("capture_incognito", () => {
   });
 });
 
-describe("session_keeps / watching_drops", () => {
-  it("keeps session items below filter threshold and drops watching ones", async () => {
+describe("manual_keeps / watching_drops", () => {
+  it("keeps manual items below filter threshold and drops watching ones", async () => {
     const includeVec = [1, 0, 0, 0];
     const pageVec = [0, 1, 0, 0];
     const llm = mockLlm({
@@ -76,20 +82,19 @@ describe("session_keeps / watching_drops", () => {
     });
     const ctx = makeCtx(llm);
     const { topic } = await seedAccepted(ctx);
-    ctx.db.prepare("UPDATE topics SET watching_confirmed = 1 WHERE id = ?").run(topic.id);
+    addTopicHost(ctx, topic.id, "example.com");
 
-    const session = await startSession(ctx, topic.id);
     ingestCapture(ctx, {
-      url: "https://example.com/session-page",
+      url: "https://example.com/manual-page",
       title: "cooking",
-      source: "session",
-      session_id: session,
+      source: "manual",
+      topic_ids: [topic.id],
       readable_text: "totally unrelated page body about cooking ".repeat(10),
     });
     await drain(ctx);
     expect(countItems(ctx.db)).toBe(1);
-    const sessionFiling = ctx.db.prepare("SELECT * FROM filings").get() as { state: string };
-    expect(sessionFiling).toBeTruthy();
+    const manualFiling = ctx.db.prepare("SELECT * FROM filings").get() as { state: string };
+    expect(manualFiling).toBeTruthy();
 
     ctx.db.prepare("DELETE FROM filings").run();
     ctx.db.prepare("DELETE FROM items").run();
@@ -104,6 +109,33 @@ describe("session_keeps / watching_drops", () => {
     });
     await drain(ctx);
     expect(countItems(ctx.db)).toBe(0);
+  });
+});
+
+describe("topic_hosts", () => {
+  it("seeds sites from the first accepted policy, requires a policy to add, and lets you add/remove independently of later re-accepts", async () => {
+    const ctx = makeCtx();
+    const { topic } = createTopic(ctx, "Local capture");
+
+    expect(() => addTopicHost(ctx, topic.id, "example.com")).toThrow(/policy/);
+
+    const proposal = createProposal(ctx, topic.id, null, SAMPLE_POLICY);
+    await acceptPolicy(ctx, topic.id, proposal.id);
+    const seeded = listTopicHosts(ctx.db, topic.id).map((h) => h.host);
+    expect(seeded).toEqual(expect.arrayContaining(["example.com", "news.ycombinator.com", "github.com"]));
+
+    const afterAdd = addTopicHost(ctx, topic.id, "https://www.arxiv.org/list");
+    expect(afterAdd.map((h) => h.host)).toContain("arxiv.org");
+
+    const afterRemove = removeTopicHost(ctx, topic.id, "example.com");
+    expect(afterRemove.map((h) => h.host)).not.toContain("example.com");
+
+    // Re-accepting a newer policy version must not silently re-add or change hosts.
+    const p2 = createProposal(ctx, topic.id, null, SAMPLE_POLICY.replace("local capture", "v2"));
+    await acceptPolicy(ctx, topic.id, p2.id);
+    const afterReaccept = listTopicHosts(ctx.db, topic.id).map((h) => h.host);
+    expect(afterReaccept).not.toContain("example.com");
+    expect(afterReaccept).toContain("arxiv.org");
   });
 });
 
@@ -122,6 +154,70 @@ describe("accept_policy", () => {
     const p2 = createProposal(ctx, topic.id, null, SAMPLE_POLICY.replace("local capture", "v2"));
     const second = await acceptPolicy(ctx, topic.id, p2.id);
     expect(second.version).toBe(2);
+  });
+});
+
+describe("hosts_api", () => {
+  it("rejects adding a site before a policy is accepted, then adds/lists/removes over HTTP", async () => {
+    const { app, ctx } = makeApp();
+    const { topic } = createTopic(ctx, "Local capture");
+
+    const denied = await api(app, "POST", `/topics/${topic.id}/hosts`, { body: { host: "example.com" } });
+    expect(denied.statusCode).toBe(400);
+    expect(denied.json().error).toBe("no_policy");
+
+    const proposal = createProposal(ctx, topic.id, null, SAMPLE_POLICY);
+    await acceptPolicy(ctx, topic.id, proposal.id);
+
+    const added = await api(app, "POST", `/topics/${topic.id}/hosts`, {
+      body: { host: "https://Example.org/path" },
+    });
+    expect(added.statusCode).toBe(200);
+    expect(added.json().hosts.map((h: { host: string }) => h.host)).toContain("example.org");
+
+    const listed = await api(app, "GET", `/topics/${topic.id}/hosts`);
+    expect(listed.json().hosts.length).toBeGreaterThan(0);
+
+    const aggregate = await api(app, "GET", "/hosts");
+    expect(aggregate.json().hosts).toContain("example.org");
+
+    const removed = await api(app, "DELETE", `/topics/${topic.id}/hosts/${encodeURIComponent("example.org")}`);
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json().hosts.map((h: { host: string }) => h.host)).not.toContain("example.org");
+  });
+});
+
+describe("delete_topic", () => {
+  it("removes the topic, orphans, and policy embeds; keeps shared items", async () => {
+    const { app, ctx } = makeApp();
+    const { topic } = await seedAccepted(ctx);
+    const other = createTopic(ctx, "Other");
+    ingestCapture(ctx, {
+      url: "https://example.com/only-here",
+      title: "Only here",
+      source: "manual",
+      topic_ids: [topic.id],
+      readable_text: "x".repeat(250),
+    });
+    ingestCapture(ctx, {
+      url: "https://example.com/shared",
+      title: "Shared",
+      source: "manual",
+      topic_ids: [topic.id, other.topic.id],
+      readable_text: "y".repeat(250),
+    });
+    const missing = await api(app, "DELETE", "/topics/does-not-exist");
+    expect(missing.statusCode).toBe(404);
+    const res = await api(app, "DELETE", `/topics/${topic.id}`);
+    expect(res.statusCode).toBe(204);
+    expect(ctx.db.prepare("SELECT * FROM topics WHERE id = ?").get(topic.id)).toBeUndefined();
+    expect(
+      ctx.db.prepare("SELECT COUNT(*) AS n FROM embeddings WHERE owner_type LIKE 'policy_%'").get() as {
+        n: number;
+      },
+    ).toEqual({ n: 0 });
+    expect(ctx.db.prepare("SELECT title FROM items").all()).toEqual([{ title: "Shared" }]);
+    expect(getTopic(ctx.db, other.topic.id)?.title).toBe("Other");
   });
 });
 
@@ -321,10 +417,4 @@ async function seedAccepted(ctx: ReturnType<typeof makeCtx>) {
   return { topic };
 }
 
-async function startSession(ctx: ReturnType<typeof makeCtx>, topicId: string): Promise<string> {
-  const id = newId();
-  ctx.db
-    .prepare("INSERT INTO sessions(id, topic_ids, started_at, paused) VALUES (?, ?, datetime('now'), 0)")
-    .run(id, JSON.stringify([topicId]));
-  return id;
-}
+

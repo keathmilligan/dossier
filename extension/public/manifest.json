@@ -11,11 +11,19 @@
     "contextMenus",
     "sidePanel",
     "scripting",
-    "webNavigation"
+    "webNavigation",
+    "notifications",
+    "alarms"
   ],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "host_permissions": ["http://127.0.0.1:18765/*"],
   "background": { "service_worker": "background.js", "type": "module" },
+  "commands": {
+    "toggle-site": {
+      "suggested_key": { "default": "Ctrl+Shift+D", "mac": "Command+Shift+D" },
+      "description": "Add or remove the current site from the active topic's capture list"
+    }
+  },
   "action": {
     "default_popup": "src/ui/popup.html",
     "default_title": "Dossier",

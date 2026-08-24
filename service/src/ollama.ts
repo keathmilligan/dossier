@@ -45,6 +45,8 @@ export class OllamaClient implements LlmClient {
   }
 
   async embed(text: string): Promise<number[] | null> {
+    const started = Date.now();
+    const input = text.slice(0, 8000);
     try {
       const res = await this.timedFetch(
         `${this.opts.baseUrl}/embeddings`,
@@ -53,15 +55,27 @@ export class OllamaClient implements LlmClient {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             model: this.opts.embedModel,
-            input: text.slice(0, 8000),
+            input,
           }),
         },
         Math.min(this.opts.timeoutMs, 8000),
       );
-      if (!res.ok) return null;
+      const ms = Date.now() - started;
+      if (!res.ok) {
+        const err = await res.text().catch(() => "");
+        console.log(`llm embed error model=${this.opts.embedModel} chars=${input.length} status=${res.status} ms=${ms} ${snip(err)}`);
+        return null;
+      }
       const body = (await res.json()) as { data?: Array<{ embedding: number[] }> };
-      return body.data?.[0]?.embedding ?? null;
-    } catch {
+      const vec = body.data?.[0]?.embedding ?? null;
+      console.log(
+        `llm embed ok model=${this.opts.embedModel} chars=${input.length} dim=${vec?.length ?? 0} ms=${ms} ${snip(input, 160)}`,
+      );
+      return vec;
+    } catch (err) {
+      console.log(
+        `llm embed error model=${this.opts.embedModel} chars=${input.length} ms=${Date.now() - started} ${errMsg(err)}`,
+      );
       return null;
     }
   }
@@ -72,6 +86,14 @@ export class OllamaClient implements LlmClient {
     tools?: ToolSpec[];
     json?: boolean;
   }): Promise<ChatResult | null> {
+    const started = Date.now();
+    const messages = [{ role: "system", content: opts.system }, ...opts.messages];
+    console.log(
+      `llm chat start model=${this.opts.chatModel} messages=${messages.length} tools=${opts.tools?.length ?? 0} json=${Boolean(opts.json)}`,
+    );
+    for (const m of messages) {
+      console.log(`llm chat  ${m.role}: ${snip(m.content)}`);
+    }
     try {
       const tools = opts.tools?.map((t) => ({
         type: "function",
@@ -83,7 +105,7 @@ export class OllamaClient implements LlmClient {
       }));
       const payload: Record<string, unknown> = {
         model: this.opts.chatModel,
-        messages: [{ role: "system", content: opts.system }, ...opts.messages],
+        messages,
       };
       if (tools?.length) payload.tools = tools;
       if (opts.json) payload.response_format = { type: "json_object" };
@@ -92,7 +114,12 @@ export class OllamaClient implements LlmClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) return null;
+      const ms = Date.now() - started;
+      if (!res.ok) {
+        const err = await res.text().catch(() => "");
+        console.log(`llm chat error model=${this.opts.chatModel} status=${res.status} ms=${ms} ${snip(err)}`);
+        return null;
+      }
       const body = (await res.json()) as {
         choices?: Array<{
           message?: {
@@ -104,16 +131,24 @@ export class OllamaClient implements LlmClient {
         }>;
       };
       const msg = body.choices?.[0]?.message;
-      if (!msg) return null;
+      if (!msg) {
+        console.log(`llm chat error model=${this.opts.chatModel} ms=${ms} empty_response`);
+        return null;
+      }
       const toolCalls: ChatToolCall[] = (msg.tool_calls ?? []).map((tc) => ({
         name: tc.function.name,
         arguments: parseArgs(tc.function.arguments),
       }));
+      const content = msg.content ?? "";
+      console.log(
+        `llm chat ok model=${this.opts.chatModel} ms=${ms} tools=${toolCalls.length} ${snip(content || toolCalls.map((t) => t.name).join(","))}`,
+      );
       return {
-        content: msg.content ?? "",
+        content,
         toolCalls: toolCalls.length ? toolCalls : undefined,
       };
-    } catch {
+    } catch (err) {
+      console.log(`llm chat error model=${this.opts.chatModel} ms=${Date.now() - started} ${errMsg(err)}`);
       return null;
     }
   }
@@ -128,6 +163,17 @@ export class OllamaClient implements LlmClient {
       clearTimeout(t);
     }
   }
+}
+
+const SNIP = 2000;
+
+function snip(s: string, n = SNIP): string {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length <= n ? one : `${one.slice(0, n)}…[${s.length} chars]`;
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function parseArgs(raw: string): Record<string, unknown> {

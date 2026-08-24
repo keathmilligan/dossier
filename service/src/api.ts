@@ -9,17 +9,20 @@ import { exportMarkdown } from "./export.js";
 import { processQueue } from "./jobs.js";
 import {
   acceptPolicy,
+  addTopicHost,
   applyStructure,
   applyVerdict,
   createTopic,
+  deleteTopic,
   patchTopic,
+  removeTopicHost,
 } from "./topics.js";
 import {
   acceptedPolicy,
-  currentSession,
-  getSession,
+  allWatchedHosts,
   getTopic,
   listNodes,
+  listTopicHosts,
   listTopics,
   listUserDenylist,
 } from "./store.js";
@@ -34,16 +37,26 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.post("/pause", async () => {
     ctx.paused.value = true;
+    ctx.logger.info("capture_paused");
     return { paused: true };
   });
 
   app.post("/resume", async () => {
     ctx.paused.value = false;
+    ctx.logger.info("capture_resumed");
     return { paused: false };
   });
 
+  app.get("/hosts", async () => {
+    return { hosts: allWatchedHosts(ctx.db) };
+  });
+
   app.get("/topics", async () => {
-    return { topics: listTopics(ctx.db) };
+    const topics = listTopics(ctx.db).map((t) => ({
+      ...t,
+      has_policy: Boolean(acceptedPolicy(ctx.db, t.id)),
+    }));
+    return { topics };
   });
 
   app.post("/topics", async (req) => {
@@ -58,10 +71,11 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
     if (!topic) throw notFound("topic_not_found");
     const policy = acceptedPolicy(ctx.db, id);
     return {
-      topic,
+      topic: { ...topic, has_policy: Boolean(policy) },
       policy: policy ?? null,
       nodes: listNodes(ctx.db, id),
       pending_proposal: latestProposal(ctx, id),
+      hosts: listTopicHosts(ctx.db, id),
     };
   });
 
@@ -74,16 +88,32 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
       status: optStr(body.status) as TopicStatus | undefined,
       auto_accept_confidence: optNum(body.auto_accept_confidence),
       venues: body.venues,
-      watching_confirmed:
-        body.watching_confirmed === undefined ? undefined : Boolean(body.watching_confirmed),
     });
     return { topic };
   });
 
-  app.delete("/topics/:id", async (req, reply) => {
+  app.get("/topics/:id/hosts", async (req) => {
     const { id } = req.params as { id: string };
     if (!getTopic(ctx.db, id)) throw notFound("topic_not_found");
-    ctx.db.prepare("DELETE FROM topics WHERE id = ?").run(id);
+    return { hosts: listTopicHosts(ctx.db, id) };
+  });
+
+  app.post("/topics/:id/hosts", async (req) => {
+    const { id } = req.params as { id: string };
+    const body = asObj(req.body);
+    const hosts = addTopicHost(ctx, id, String(body.host ?? ""));
+    return { hosts };
+  });
+
+  app.delete("/topics/:id/hosts/:host", async (req) => {
+    const { id, host } = req.params as { id: string; host: string };
+    const hosts = removeTopicHost(ctx, id, decodeURIComponent(host));
+    return { hosts };
+  });
+
+  app.delete("/topics/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    deleteTopic(ctx, id);
     return reply.code(204).send();
   });
 
@@ -157,51 +187,12 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
       .send(md);
   });
 
-  app.post("/sessions", async (req) => {
-    const body = asObj(req.body);
-    const topicIds = Array.isArray(body.topic_ids) ? (body.topic_ids as string[]) : [];
-    if (!topicIds.length) throw badRequest("topic_ids_required");
-    for (const tid of topicIds) {
-      if (!getTopic(ctx.db, tid)) throw notFound("topic_not_found");
-      if (!acceptedPolicy(ctx.db, tid)) throw badRequest("no_policy", "accept a policy before recording");
-    }
-    const existing = currentSession(ctx.db);
-    if (existing) {
-      ctx.db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?").run(nowIso(), existing.id);
-    }
-    const id = newId();
-    ctx.db
-      .prepare("INSERT INTO sessions(id, topic_ids, started_at, paused) VALUES (?, ?, ?, 0)")
-      .run(id, JSON.stringify(topicIds), nowIso());
-    return { session: getSession(ctx.db, id) };
-  });
-
-  app.get("/sessions/current", async () => {
-    return { session: currentSession(ctx.db) ?? null, paused: ctx.paused.value };
-  });
-
-  app.post("/sessions/:id/pause", async (req) => {
-    const session = requireSession(ctx, (req.params as { id: string }).id);
-    ctx.db.prepare("UPDATE sessions SET paused = 1 WHERE id = ?").run(session.id);
-    ctx.paused.value = true;
-    return { session: getSession(ctx.db, session.id), paused: true };
-  });
-
-  app.post("/sessions/:id/resume", async (req) => {
-    const session = requireSession(ctx, (req.params as { id: string }).id);
-    ctx.db.prepare("UPDATE sessions SET paused = 0 WHERE id = ?").run(session.id);
-    ctx.paused.value = false;
-    return { session: getSession(ctx.db, session.id), paused: false };
-  });
-
-  app.post("/sessions/:id/stop", async (req) => {
-    const session = requireSession(ctx, (req.params as { id: string }).id);
-    ctx.db.prepare("UPDATE sessions SET ended_at = ?, paused = 0 WHERE id = ?").run(nowIso(), session.id);
-    return { session: getSession(ctx.db, session.id) };
-  });
-
   app.post("/capture", async (req) => {
-    if (ctx.paused.value) throw badRequest("paused", "capture is paused");
+    if (ctx.paused.value) {
+      const body = req.body as CaptureBody;
+      ctx.logger.info("capture_dropped", { url: body?.url, source: body?.source, reason: "paused" });
+      throw badRequest("paused", "capture is paused");
+    }
     const result = ingestCapture(ctx, req.body as CaptureBody);
     void processQueue(ctx);
     return result;
@@ -210,7 +201,9 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.post("/filings/:id/verdict", async (req) => {
     const { id } = req.params as { id: string };
     const body = asObj(req.body);
-    applyVerdict(ctx, id, String(body.action ?? ""), optStr(body.node_id));
+    const action = String(body.action ?? "");
+    applyVerdict(ctx, id, action, optStr(body.node_id));
+    ctx.logger.info("filing_verdict", { filing_id: id, action });
     return { ok: true };
   });
 
@@ -271,12 +264,6 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
     const n = await processQueue(ctx, 100);
     return { processed: n };
   });
-}
-
-function requireSession(ctx: AppContext, id: string) {
-  const session = getSession(ctx.db, id);
-  if (!session || session.ended_at) throw notFound("session_not_found");
-  return session;
 }
 
 function latestProposal(ctx: AppContext, topicId: string) {

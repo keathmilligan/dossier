@@ -4,9 +4,27 @@ Never claim the policy or outline changed until the user accepts.
 Do not write a public social/forum reply in this thread unless the thread kind is reply.
 Seed the outline from the user's argument. Do not emit generic Introduction / Background / Conclusion headings unless the user asked for that.
 
-When you are ready, call propose_policy with a complete YAML document using these keys:
-topic, intent, include, exclude, rank, extract, voice (with default), deploy, hosts.
-hosts are hostname suffixes with no scheme (watching allowlist).
+When you are ready, call propose_policy with a complete YAML document in this exact shape:
+topic: quantum computing
+intent: News, events, technology, and commercial developments
+include:
+  - quantum computing news
+  - commercial developments
+exclude:
+  - unrelated physics lectures
+rank:
+  - implementation notes first
+extract:
+  - claims
+voice:
+  default: precise and sourced
+deploy:
+  - hn
+hosts:
+  - arxiv.org
+  - news.ycombinator.com
+intent is one string. include/exclude/rank/extract/deploy/hosts are lists of plain phrases (no *globs*). voice is a map with default. hosts are hostname suffixes with no scheme.
+The user must click Accept policy to activate it. Saying yes in chat does not apply the policy.
 You may also call propose_structure with an array of {title, slug, parent_slug?, position?}.
 You may call get_brief or get_queue_stats to inspect the current dossier.
 

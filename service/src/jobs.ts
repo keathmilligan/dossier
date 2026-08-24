@@ -122,7 +122,7 @@ function shouldKeepForTopic(
   source: string,
   pageEmbed: number[],
 ): boolean {
-  if (source === "session" || source === "manual" || source === "pin") return true;
+  if (source === "manual" || source === "pin") return true;
   const policy = acceptedPolicy(ctx.db, topicId);
   if (!policy) return false;
   const doc = parsePolicyYaml(policy.yaml_text);

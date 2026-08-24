@@ -4,12 +4,13 @@ import type {
   Item,
   NodeRow,
   Policy,
-  SessionRow,
   Topic,
+  TopicHost,
 } from "./models.js";
 import { newId, nowIso } from "./ids.js";
 import { deleteFts, upsertFts } from "./db.js";
 import { decodeVec, encodeVec } from "./embeddings.js";
+import { hostAllowedByWatchlist } from "./denylist.js";
 
 export function getTopic(db: Db, id: string): Topic | undefined {
   return db.prepare("SELECT * FROM topics WHERE id = ?").get(id) as Topic | undefined;
@@ -77,14 +78,52 @@ export function getFilingById(db: Db, id: string): Filing | undefined {
   return db.prepare("SELECT * FROM filings WHERE id = ?").get(id) as Filing | undefined;
 }
 
-export function currentSession(db: Db): SessionRow | undefined {
+export function listTopicHosts(db: Db, topicId: string): TopicHost[] {
   return db
-    .prepare("SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1")
-    .get() as SessionRow | undefined;
+    .prepare("SELECT * FROM topic_hosts WHERE topic_id = ? ORDER BY added_at")
+    .all(topicId) as TopicHost[];
 }
 
-export function getSession(db: Db, id: string): SessionRow | undefined {
-  return db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
+export function addTopicHostRow(db: Db, topicId: string, host: string): TopicHost {
+  const existing = db
+    .prepare("SELECT * FROM topic_hosts WHERE topic_id = ? AND host = ?")
+    .get(topicId, host) as TopicHost | undefined;
+  if (existing) return existing;
+  const row: TopicHost = { id: newId(), topic_id: topicId, host, added_at: nowIso() };
+  db.prepare(
+    "INSERT INTO topic_hosts(id, topic_id, host, added_at) VALUES (@id, @topic_id, @host, @added_at)",
+  ).run(row);
+  return row;
+}
+
+export function removeTopicHostRow(db: Db, topicId: string, host: string): boolean {
+  const res = db
+    .prepare("DELETE FROM topic_hosts WHERE topic_id = ? AND host = ?")
+    .run(topicId, host);
+  return res.changes > 0;
+}
+
+/** Topics whose watched-site list covers `host`. */
+export function topicsForHost(db: Db, host: string): Topic[] {
+  const candidates = db
+    .prepare(
+      `SELECT DISTINCT t.* FROM topics t
+       JOIN topic_hosts h ON h.topic_id = t.id
+       WHERE t.status IN ('watching','active')`,
+    )
+    .all() as Topic[];
+  return candidates.filter((t) =>
+    hostAllowedByWatchlist(
+      host,
+      listTopicHosts(db, t.id).map((h) => h.host),
+    ),
+  );
+}
+
+/** Every host currently watched by any topic, deduplicated. Used by the extension to decide whether a navigation is worth reporting. */
+export function allWatchedHosts(db: Db): string[] {
+  const rows = db.prepare("SELECT DISTINCT host FROM topic_hosts").all() as Array<{ host: string }>;
+  return rows.map((r) => r.host);
 }
 
 export function listUserDenylist(db: Db): Array<{ id: string; pattern: string; reason: string | null }> {
@@ -131,14 +170,13 @@ export function upsertItemEmbed(db: Db, itemId: string, model: string, vec: numb
 
 export function saveItem(db: Db, item: Item): void {
   db.prepare(
-    `INSERT INTO items(id, url, url_normalized, title, referrer, captured_at, dwell_ms, source, session_id, readable_text, highlight_text, origin)
-     VALUES (@id, @url, @url_normalized, @title, @referrer, @captured_at, @dwell_ms, @source, @session_id, @readable_text, @highlight_text, @origin)
+    `INSERT INTO items(id, url, url_normalized, title, referrer, captured_at, dwell_ms, source, readable_text, highlight_text, origin)
+     VALUES (@id, @url, @url_normalized, @title, @referrer, @captured_at, @dwell_ms, @source, @readable_text, @highlight_text, @origin)
      ON CONFLICT(id) DO UPDATE SET
        title = excluded.title,
        dwell_ms = excluded.dwell_ms,
        readable_text = excluded.readable_text,
-       highlight_text = excluded.highlight_text,
-       session_id = COALESCE(excluded.session_id, items.session_id)`,
+       highlight_text = excluded.highlight_text`,
   ).run(item);
   upsertFts(db, item);
 }

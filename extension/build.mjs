@@ -1,11 +1,11 @@
 import { build } from "vite";
-import { mkdirSync, copyFileSync, existsSync, cpSync } from "node:fs";
+import { copyFileSync, existsSync, watch } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const outDir = resolve(root, "dist");
-const watch = process.argv.includes("--watch");
+const watchMode = process.argv.includes("--watch");
 
 async function buildUi() {
   await build({
@@ -16,7 +16,8 @@ async function buildUi() {
     build: {
       outDir,
       emptyOutDir: true,
-      watch: watch ? {} : null,
+      watch: null,
+      modulePreload: false,
       rollupOptions: {
         input: {
           popup: resolve(root, "src/ui/popup.html"),
@@ -42,7 +43,7 @@ async function buildContent(name, entry) {
     build: {
       outDir,
       emptyOutDir: false,
-      watch: watch ? {} : null,
+      watch: null,
       lib: {
         entry: resolve(root, entry),
         name: `dossier_${name}`,
@@ -56,14 +57,56 @@ async function buildContent(name, entry) {
   });
 }
 
-await buildUi();
-await buildContent("extract", "src/content/extract.ts");
-await buildContent("assist", "src/content/assist.ts");
-await buildContent("highlight", "src/content/highlight.ts");
+function copyManifest() {
+  const manifestSrc = resolve(root, "public/manifest.json");
+  const manifestDest = resolve(outDir, "manifest.json");
+  if (existsSync(manifestSrc)) copyFileSync(manifestSrc, manifestDest);
+}
 
-const manifestSrc = resolve(root, "public/manifest.json");
-const manifestDest = resolve(outDir, "manifest.json");
-if (existsSync(manifestSrc)) copyFileSync(manifestSrc, manifestDest);
+async function buildAll() {
+  await buildUi();
+  await buildContent("extract", "src/content/extract.ts");
+  await buildContent("assist", "src/content/assist.ts");
+  await buildContent("highlight", "src/content/highlight.ts");
+  copyManifest();
+  console.log("extension built →", outDir);
+}
 
-// Side panel / popup paths in the built HTML live under src/ui/
-console.log("extension built →", outDir);
+await buildAll();
+
+if (watchMode) {
+  let timer;
+  let running = false;
+  let queued = false;
+
+  const kick = async () => {
+    if (running) {
+      queued = true;
+      return;
+    }
+    running = true;
+    try {
+      await buildAll();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      running = false;
+      if (queued) {
+        queued = false;
+        await kick();
+      }
+    }
+  };
+
+  const onChange = (_event, filename) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (filename) console.log("changed:", filename);
+      void kick();
+    }, 100);
+  };
+
+  watch(resolve(root, "src"), { recursive: true }, onChange);
+  watch(resolve(root, "public"), { recursive: true }, onChange);
+  console.log("watching src/ and public/");
+}

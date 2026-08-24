@@ -1,4 +1,7 @@
-type Topic = { id: string; title: string; intent: string; watching_confirmed: number };
+import { normalizeHost, requestHostPermission } from "../sites";
+
+type Topic = { id: string; title: string; intent: string; has_policy: boolean };
+type TopicHost = { id: string; host: string; added_at: string };
 type OutlineNode = { id: string; title: string; slug: string; kind: string };
 type Filing = {
   id: string;
@@ -53,7 +56,17 @@ async function loadTopics(): Promise<void> {
   ul.innerHTML = "";
   for (const t of data.topics) {
     const li = document.createElement("li");
-    li.textContent = t.title;
+    li.className = "topic";
+    const title = document.createElement("span");
+    title.textContent = t.title;
+    const del = document.createElement("button");
+    del.className = "danger";
+    del.textContent = "Delete";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void removeTopic(t);
+    });
+    li.append(title, del);
     li.addEventListener("click", () => void openTopic(t.id));
     ul.appendChild(li);
   }
@@ -65,6 +78,7 @@ async function openTopic(id: string): Promise<void> {
     policy: { yaml_text: string } | null;
     nodes: OutlineNode[];
     pending_proposal: { id: string; yaml_text: string; diff_text: string; accepted_at: string | null } | null;
+    hosts: TopicHost[];
   }>("GET", `/topics/${id}`);
   topic = data.topic;
   nodes = data.nodes;
@@ -78,31 +92,80 @@ async function openTopic(id: string): Promise<void> {
     $("proposal-diff").textContent = data.pending_proposal.diff_text;
     show("proposal", true);
   }
-  renderWatch(data.policy?.yaml_text ?? null);
+  await send({ type: "set-active-topic", topicId: topic.id });
+  renderSites(data.hosts);
   await renderTab();
 }
 
-function renderWatch(yaml: string | null): void {
-  const hosts = yaml ? parseHosts(yaml) : [];
-  show("watch-box", hosts.length > 0 && !topic?.watching_confirmed);
-  $("watch-hosts").innerHTML = hosts.map((h) => `<li>${h}</li>`).join("");
+function renderSites(hosts: TopicHost[]): void {
+  show("sites-no-policy", !topic?.has_policy);
+  show("sites-ui", Boolean(topic?.has_policy));
+  const ul = $("site-list");
+  ul.innerHTML = "";
+  for (const h of hosts) {
+    const li = document.createElement("li");
+    li.className = "site-row";
+    const span = document.createElement("span");
+    span.textContent = h.host;
+    const rm = document.createElement("button");
+    rm.className = "danger";
+    rm.textContent = "×";
+    rm.title = `Remove ${h.host}`;
+    rm.addEventListener("click", () => void removeSite(h.host));
+    li.append(span, rm);
+    ul.appendChild(li);
+  }
 }
 
-function parseHosts(yaml: string): string[] {
-  const m = yaml.match(/hosts:\s*\n((?:\s+-\s+.+\n?)+)/);
-  if (!m) return [];
-  return m[1]!.split("\n")
-    .map((l) => l.replace(/^\s*-\s*/, "").trim())
-    .filter(Boolean);
+async function loadSites(): Promise<void> {
+  if (!topic) return;
+  const data = await call<{ hosts: TopicHost[] }>("GET", `/topics/${topic.id}/hosts`);
+  renderSites(data.hosts);
+}
+
+async function addSite(): Promise<void> {
+  if (!topic) return;
+  const input = $("add-host") as HTMLInputElement;
+  const raw = input.value.trim();
+  if (!raw) return;
+  const host = normalizeHost(raw);
+  if (!host) {
+    alert("not a valid hostname");
+    return;
+  }
+  // First await: permissions.request must run during the click/Enter gesture.
+  const granted = await requestHostPermission(host);
+  if (!granted) {
+    alert("Host permission declined. The site was not added.");
+    return;
+  }
+  const r = await send<{ error?: string; detail?: string; hosts?: TopicHost[] }>({
+    type: "add-site",
+    topicId: topic.id,
+    host,
+  });
+  if (r.error) {
+    alert(r.detail || r.error);
+    return;
+  }
+  input.value = "";
+  renderSites(r.hosts ?? []);
+}
+
+async function removeSite(host: string): Promise<void> {
+  if (!topic) return;
+  const r = await send<{ hosts?: TopicHost[] }>({ type: "remove-site", topicId: topic.id, host });
+  renderSites(r.hosts ?? []);
 }
 
 async function renderTab(): Promise<void> {
-  for (const name of ["chat", "queue", "brief", "policy", "rejected"]) {
+  for (const name of ["chat", "sites", "queue", "brief", "policy", "rejected"]) {
     show(`tab-${name}`, tab === name);
     const btn = document.querySelector<HTMLButtonElement>(`#tabs [data-tab="${name}"]`);
     if (btn) btn.classList.toggle("on", tab === name);
   }
   if (!topic) return;
+  if (tab === "sites") await loadSites();
   if (tab === "queue") await loadQueue("inbox,proposed", "queue");
   if (tab === "rejected") await loadQueue("rejected", "rejected");
   if (tab === "brief") {
@@ -160,6 +223,24 @@ $("back").addEventListener("click", () => {
   void loadTopics();
 });
 
+$("delete-topic").addEventListener("click", () => {
+  if (topic) void removeTopic(topic);
+});
+
+async function removeTopic(t: Topic): Promise<void> {
+  if (!confirm(`Delete “${t.title}”? This cannot be undone.`)) return;
+  await call("DELETE", `/topics/${t.id}`);
+  if (topic?.id === t.id) {
+    topic = null;
+    threadId = null;
+    proposalId = null;
+    structurePlan = null;
+    show("topic-view", false);
+    show("topics-view", true);
+  }
+  await loadTopics();
+}
+
 $("tabs").addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("button");
   if (!btn?.dataset.tab) return;
@@ -170,29 +251,49 @@ $("tabs").addEventListener("click", (e) => {
 $("chat-send").addEventListener("click", async () => {
   if (!topic) return;
   const input = $("chat-input") as HTMLTextAreaElement;
+  const sendBtn = $("chat-send") as HTMLButtonElement;
   const message = input.value.trim();
-  if (!message) return;
+  if (!message || sendBtn.disabled) return;
   input.value = "";
-  const data = await call<{
-    thread_id: string;
-    messages: Array<{ role: string; content: string }>;
-    proposal?: { id: string; diff_text: string };
-    structure_plan?: Array<{ title: string; slug: string }>;
-  }>("POST", `/topics/${topic.id}/chat`, { message, thread_id: threadId });
-  threadId = data.thread_id;
   const log = $("chat-log");
-  log.innerHTML = data.messages
-    .map((m) => `<div class="msg ${m.role}"><strong>${m.role}</strong> ${escapeHtml(m.content)}</div>`)
-    .join("");
-  if (data.proposal) {
-    proposalId = data.proposal.id;
-    $("proposal-diff").textContent = data.proposal.diff_text;
-    show("proposal", true);
-  }
-  if (data.structure_plan?.length) {
-    structurePlan = data.structure_plan;
-    $("structure-plan").textContent = JSON.stringify(data.structure_plan, null, 2);
-    show("structure", true);
+  log.insertAdjacentHTML(
+    "beforeend",
+    `<div class="msg user"><strong>user</strong> ${escapeHtml(message)}</div>
+     <div class="msg assistant pending" id="chat-pending"><strong>assistant</strong> <span class="working">Working</span></div>`,
+  );
+  sendBtn.disabled = true;
+  input.disabled = true;
+  try {
+    const data = await call<{
+      thread_id: string;
+      messages: Array<{ role: string; content: string }>;
+      proposal?: { id: string; diff_text: string };
+      structure_plan?: Array<{ title: string; slug: string }>;
+    }>("POST", `/topics/${topic.id}/chat`, { message, thread_id: threadId });
+    threadId = data.thread_id;
+    log.innerHTML = data.messages
+      .map((m) => `<div class="msg ${m.role}"><strong>${m.role}</strong> ${escapeHtml(m.content)}</div>`)
+      .join("");
+    if (data.proposal) {
+      proposalId = data.proposal.id;
+      $("proposal-diff").textContent = data.proposal.diff_text;
+      show("proposal", true);
+    }
+    if (data.structure_plan?.length) {
+      structurePlan = data.structure_plan;
+      $("structure-plan").textContent = JSON.stringify(data.structure_plan, null, 2);
+      show("structure", true);
+    }
+  } catch (err) {
+    $("chat-pending")?.remove();
+    log.insertAdjacentHTML(
+      "beforeend",
+      `<div class="msg error">${escapeHtml((err as Error).message)}</div>`,
+    );
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
   }
 });
 
@@ -225,15 +326,9 @@ $("propose-yaml").addEventListener("click", async () => {
   void renderTab();
 });
 
-$("enable-watch").addEventListener("click", async () => {
-  if (!topic) return;
-  const hosts = parseHosts(($("policy-yaml").textContent ?? "") + "\n" + ($("policy-edit") as HTMLTextAreaElement).value);
-  const origins = hosts.flatMap((h) => [`*://${h}/*`, `*://*.${h}/*`]);
-  const granted = await chrome.permissions.request({ origins });
-  if (!granted) return;
-  await call("PATCH", `/topics/${topic.id}`, { watching_confirmed: true });
-  await send({ type: "watching-hosts", hosts });
-  show("watch-box", false);
+$("add-host-btn").addEventListener("click", () => void addSite());
+$("add-host").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void addSite();
 });
 
 $("export").addEventListener("click", async () => {

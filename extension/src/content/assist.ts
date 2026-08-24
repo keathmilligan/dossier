@@ -37,9 +37,9 @@ function render(data: AssistResponse, denied: boolean): void {
   shadow.innerHTML = `
     <style>
       :host { all: initial; }
-      .panel { font: 13px/1.45 system-ui, sans-serif; color: #e8eaed; background: #1b1d21; width: 360px; max-height: 100vh; overflow: auto; box-shadow: -4px 0 24px #0008; padding: 12px 14px 16px; }
-      h1 { font-size: 14px; margin: 0 0 8px; }
-      h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #9aa0a6; margin: 12px 0 4px; }
+      .panel { font: 16px/1.45 system-ui, sans-serif; color: #e8eaed; background: #1b1d21; width: 400px; max-height: 100vh; overflow: auto; box-shadow: -4px 0 24px #0008; padding: 12px 14px 16px; }
+      h1 { font-size: 18px; margin: 0 0 8px; }
+      h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: #9aa0a6; margin: 12px 0 4px; }
       ul { margin: 0; padding-left: 16px; }
       .gap { background: #3c2f12; color: #fdd663; padding: 8px; border-radius: 6px; }
       .warn { background: #3c1f1f; color: #f28b82; padding: 8px; border-radius: 6px; margin-bottom: 8px; }

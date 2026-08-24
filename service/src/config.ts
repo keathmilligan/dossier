@@ -83,6 +83,7 @@ export interface Paths {
   configPath: string;
   tokenPath: string;
   dbPath: string;
+  logPath: string;
 }
 
 export function pathsFor(opts: { dataDir?: string; configDir?: string } = {}): Paths {
@@ -94,6 +95,7 @@ export function pathsFor(opts: { dataDir?: string; configDir?: string } = {}): P
     configPath: join(configDir, "config.toml"),
     tokenPath: join(dataDir, "token"),
     dbPath: join(dataDir, "dossier.sqlite"),
+    logPath: join(dataDir, "dossier.log"),
   };
 }
 

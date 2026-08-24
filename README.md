@@ -11,14 +11,18 @@ Chromium only (Chrome, Brave, Edge, Chromium). Firefox is out of scope for v0.1.
 ```
 Browser extension  →  dossierd (127.0.0.1)
                          ├─ ~/.config/dossier/config.toml
-                         ├─ ~/.local/share/dossier/  (token, SQLite)
+                         ├─ ~/.local/share/dossier/  (token, SQLite, dossier.log)
                          └─ Ollama (optional for capture; required for chat, judge, draft)
 ```
 
-* **Session** — you hit record for one or more topics. Higher capture. Banks, mail, IdPs, incognito, and password fields are still blocked.
-* **Watching** — after you accept a policy, only hosts you confirmed are eligible. Not the open web.
-* **Pin / highlight** — always available on the current tab.
+One workflow: establish a capture policy for a topic, then add or remove sites for it with a single click or hotkey. Nothing is captured against a topic with no accepted policy, and nothing is captured from a site that isn't on that topic's list.
+
+* **Policy** — chat a topic's intent and outline into existence, review the diff, accept it. This is the only gate: a topic with no accepted policy never captures anything.
+* **Sites** — once a policy is accepted, add the page you're on with one click (toolbar popup) or one hotkey (`chrome://extensions/shortcuts`, default `Ctrl+Shift+D` / `⌘⇧D`). Removing a site is the same button/hotkey, or the × next to it in the popup or side panel. Banks, mail, IdPs, incognito, and password fields are always blocked regardless of the site list.
+* **Pin / highlight** — always available on the current tab, independent of any topic's site list.
 * **Assist** — on a thread (generic extract; better parsers for Hacker News and GitHub issues/PRs) you get what you already know, talking points, a short draft, a cite — or an honest gap. The thread is not stored unless you Pin it.
+
+Every policy accepted, site added or removed, and page captured or dropped is logged by the service — see [Activity log](#activity-log).
 
 ## Requirements
 
@@ -105,21 +109,21 @@ The popup shows **service not running** if `dossierd` is down, and will refuse t
 
 ### 4. Permissions
 
-Pin-this-page uses `activeTab` only. Starting a **session** or enabling **watching** asks for optional host access so the extension can read those pages. Decline means you can still pin manually.
+Pin-this-page uses `activeTab` only. Adding a site asks for optional host access scoped to that one site (and its subdomains) so the extension can read pages there. Decline means the site isn't added; you can still pin pages on it manually. Removing a site revokes that host permission again if no other topic still needs it.
 
 ## Usage
 
 1. Start `dossierd`. Confirm the popup shows the service as healthy.
 2. Open the side panel. Create a topic and chat until the policy and outline look right. **Accept the diff.** Nothing is captured against a topic with no accepted policy.
-3. Watching: confirm the host list the policy proposed, then browse. Only those hosts, after an 8s dwell, are candidates.
-4. Or start a **session** for one or more topics when you sit down to work. Toolbar badge `REC`. Pause (`‖`) stops ingest immediately; assist still works.
-5. Review the queue (keep / refile / reject). `j`/`k` move, `enter` keeps, `x` rejects.
+3. Once a policy is accepted, browse to a site you want captured and click **Add this site** in the popup (or press the hotkey — set one at `chrome://extensions/shortcuts`, suggested `Ctrl+Shift+D` / `⌘⇧D`). The same button/hotkey removes it again; the side panel's **Sites** tab lists every site for a topic with a `×` to remove any of them, or a box to add one by typing its hostname. After an 8s dwell on an added site, the page is a capture candidate.
+4. Pause (`‖`) stops ingest immediately; assist still works.
+5. Review the queue (keep / refile / reject). `j`/`k` move, `enter` keeps, `x` rejects, `1`–`9` files into a section.
 6. Open the brief. Export Markdown when you want a file you can start writing from.
 7. On an HN thread, GitHub issue, or any page: open Assist. Copy a draft if you would send it. Pin an objection to turn it into inbox research. Dossier never clicks Send.
 
-Toolbar badges: `REC` session, `WATCH` watching, `HELP` assist open (not recording), `‖` paused.
+Toolbar badge: `IN` current site is on a topic's list, `HELP` assist open (and not on a watched site), `‖` paused, blank otherwise.
 
-Incognito is never captured. Mail, banks, health, IdPs, and password managers are denylisted for capture. Assist may *read* the current thread on those hosts to help you reply; it will not save the thread unless you Pin, and the UI will say so.
+Incognito is never captured. Mail, banks, health, IdPs, and password managers are denylisted for capture regardless of the site list. Assist may *read* the current thread on those hosts to help you reply; it will not save the thread unless you Pin, and the UI will say so.
 
 ## Configuration
 
@@ -148,6 +152,23 @@ exclude_margin = 0.04
 
 Restart `dossierd` after changes.
 
+## Activity log
+
+Every policy accepted, site added or removed, capture paused/resumed, and page captured or dropped (with the reason: denylisted, too short, no eligible topic, paused, incognito) is logged by `dossierd` — to the console and to `~/.local/share/dossier/dossier.log`, rotated once it passes 5MB (one `.log.1` backup kept). Each line is one event with a timestamp, level, and the specific detail (topic, host, url, reason) needed to understand it without reading the source:
+
+```
+2026-08-22T18:03:11.482Z [INFO] policy_accepted topic_id=... title="local capture" version=1 seeded_hosts=["news.ycombinator.com","github.com"]
+2026-08-22T18:03:42.019Z [INFO] site_added topic_id=... title="local capture" host=arxiv.org
+2026-08-22T18:04:05.221Z [INFO] capture_ingested url=https://arxiv.org/abs/... source=watching item_id=... title="..." topics=["local capture"] origin=public
+2026-08-22T18:05:12.900Z [INFO] capture_dropped url=https://mail.google.com/... source=manual reason=denylisted pattern="host matches gmail.com denylist"
+```
+
+Page/highlight text itself is never written to this log, and bearer tokens are always redacted if a caller ever tries to log one. Tail it while you work if you want to see exactly what the extension is doing:
+
+```bash
+tail -f ~/.local/share/dossier/dossier.log
+```
+
 ## Privacy
 
 * Data never leaves the machine except to the configured LLM `base_url`.
@@ -173,14 +194,14 @@ native/        Native-messaging host manifest
 ```bash
 cd service
 npm install
-npm run dev          # tsx watch → http://127.0.0.1:18765
+npm run dev          # tsc + restart on src/ change → http://127.0.0.1:18765
 npm start            # node dist/index.js (after npm run build)
 npm test             # Vitest; LLM mocked
 npm test -- denylist
 npm run typecheck    # tsc --noEmit
 ```
 
-Tests must not call a live model. Fixtures cover normalize, denylist, cheap filter, auth/origin rejection, session-vs-watching persist rules, judge mapping, policy accept, brief/export, and assist (no-write, pin, private leak, ungrounded ids).
+Tests must not call a live model. Fixtures cover normalize, denylist, cheap filter, auth/origin rejection, manual-vs-watching persist rules, site add/remove (requires an accepted policy, seeds once, survives re-accepts), the activity logger, judge mapping, policy accept, brief/export, and assist (no-write, pin, private leak, ungrounded ids).
 
 ### Extension
 

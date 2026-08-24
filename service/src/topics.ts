@@ -1,10 +1,19 @@
 import type { AppContext } from "./context.js";
-import type { StructurePlanNode, Topic, TopicStatus } from "./models.js";
+import type { StructurePlanNode, Topic, TopicHost, TopicStatus } from "./models.js";
 import { badRequest, notFound } from "./errors.js";
 import { newId, nowIso } from "./ids.js";
 import { parsePolicyYaml } from "./policy.js";
 import { encodeVec } from "./embeddings.js";
-import { acceptedPolicy, getTopic, inboxNode, listNodes } from "./store.js";
+import {
+  acceptedPolicy,
+  addTopicHostRow,
+  deleteItem,
+  getTopic,
+  inboxNode,
+  listNodes,
+  listTopicHosts,
+  removeTopicHostRow,
+} from "./store.js";
 
 export function createTopic(ctx: AppContext, title: string): { topic: Topic; thread_id: string } {
   const trimmed = title.trim();
@@ -17,14 +26,13 @@ export function createTopic(ctx: AppContext, title: string): { topic: Topic; thr
     status: "watching",
     venues_json: "[]",
     auto_accept_confidence: ctx.config.capture.auto_accept_confidence,
-    watching_confirmed: 0,
     created_at: now,
     updated_at: now,
   };
   ctx.db
     .prepare(
-      `INSERT INTO topics(id, title, intent, status, venues_json, auto_accept_confidence, watching_confirmed, created_at, updated_at)
-       VALUES (@id, @title, @intent, @status, @venues_json, @auto_accept_confidence, @watching_confirmed, @created_at, @updated_at)`,
+      `INSERT INTO topics(id, title, intent, status, venues_json, auto_accept_confidence, created_at, updated_at)
+       VALUES (@id, @title, @intent, @status, @venues_json, @auto_accept_confidence, @created_at, @updated_at)`,
     )
     .run(topic);
   inboxNode(ctx.db, topic.id);
@@ -32,6 +40,7 @@ export function createTopic(ctx: AppContext, title: string): { topic: Topic; thr
   ctx.db
     .prepare("INSERT INTO chat_threads(id, topic_id, kind, created_at) VALUES (?, ?, 'setup', ?)")
     .run(threadId, topic.id, now);
+  ctx.logger.info("topic_created", { topic_id: topic.id, title: topic.title });
   return { topic, thread_id: threadId };
 }
 
@@ -44,7 +53,6 @@ export function patchTopic(
     status?: TopicStatus;
     auto_accept_confidence?: number;
     venues?: unknown;
-    watching_confirmed?: boolean;
   },
 ): Topic {
   const topic = getTopic(ctx.db, id);
@@ -59,23 +67,43 @@ export function patchTopic(
         ? patch.auto_accept_confidence
         : topic.auto_accept_confidence,
     venues_json: patch.venues !== undefined ? JSON.stringify(patch.venues) : topic.venues_json,
-    watching_confirmed:
-      patch.watching_confirmed === undefined
-        ? topic.watching_confirmed
-        : patch.watching_confirmed
-          ? 1
-          : 0,
     updated_at: nowIso(),
   };
   ctx.db
     .prepare(
       `UPDATE topics SET title=@title, intent=@intent, status=@status,
-        auto_accept_confidence=@auto_accept_confidence, venues_json=@venues_json,
-        watching_confirmed=@watching_confirmed, updated_at=@updated_at
+        auto_accept_confidence=@auto_accept_confidence, venues_json=@venues_json, updated_at=@updated_at
        WHERE id=@id`,
     )
     .run(next);
   return next;
+}
+
+export function deleteTopic(ctx: AppContext, id: string): void {
+  const topic = getTopic(ctx.db, id);
+  if (!topic) throw notFound("topic_not_found");
+  const policies = ctx.db.prepare("SELECT id FROM policies WHERE topic_id = ?").all(id) as Array<{
+    id: string;
+  }>;
+  for (const p of policies) {
+    ctx.db
+      .prepare(
+        "DELETE FROM embeddings WHERE owner_type IN ('policy_include', 'policy_exclude') AND owner_id LIKE ?",
+      )
+      .run(`${p.id}:%`);
+  }
+  const orphans = ctx.db
+    .prepare(
+      `SELECT f.item_id AS id FROM filings f
+       WHERE f.topic_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM filings o WHERE o.item_id = f.item_id AND o.topic_id != ?
+         )`,
+    )
+    .all(id, id) as Array<{ id: string }>;
+  for (const item of orphans) deleteItem(ctx.db, item.id);
+  ctx.db.prepare("DELETE FROM topics WHERE id = ?").run(id);
+  ctx.logger.info("topic_deleted", { topic_id: id, title: topic.title });
 }
 
 export async function acceptPolicy(
@@ -104,12 +132,71 @@ export async function acceptPolicy(
     .prepare("UPDATE topics SET intent = ?, updated_at = ? WHERE id = ?")
     .run(doc.intent, now, topicId);
   inboxNode(ctx.db, topicId);
+
+  // First acceptance seeds the site list with the policy's suggested hosts.
+  // Later re-acceptances never touch it — sites are managed independently
+  // from then on, via addTopicHost/removeTopicHost.
+  let seededHosts: string[] = [];
+  if (version === 1 && doc.hosts.length && listTopicHosts(ctx.db, topicId).length === 0) {
+    for (const raw of doc.hosts) {
+      const host = normalizeHost(raw);
+      if (!host) continue;
+      addTopicHostRow(ctx.db, topicId, host);
+      seededHosts.push(host);
+    }
+  }
+
   const embeds = Promise.all([
     embedPolicyLines(ctx, policyId, doc.include, "policy_include", "i"),
     embedPolicyLines(ctx, policyId, doc.exclude, "policy_exclude", "e"),
   ]);
   await Promise.race([embeds, new Promise<void>((r) => setTimeout(r, 2000))]);
+  ctx.logger.info("policy_accepted", {
+    topic_id: topicId,
+    title: topic.title,
+    version,
+    seeded_hosts: seededHosts.length ? seededHosts : undefined,
+  });
   return { version, policy_id: policyId };
+}
+
+export function addTopicHost(ctx: AppContext, topicId: string, rawHost: string): TopicHost[] {
+  const topic = getTopic(ctx.db, topicId);
+  if (!topic) throw notFound("topic_not_found");
+  if (!acceptedPolicy(ctx.db, topicId)) {
+    throw badRequest("no_policy", "accept a capture policy before adding sites");
+  }
+  const host = normalizeHost(rawHost);
+  if (!host) throw badRequest("invalid_host", "not a valid hostname");
+  addTopicHostRow(ctx.db, topicId, host);
+  ctx.logger.info("site_added", { topic_id: topicId, title: topic.title, host });
+  return listTopicHosts(ctx.db, topicId);
+}
+
+export function removeTopicHost(ctx: AppContext, topicId: string, rawHost: string): TopicHost[] {
+  const topic = getTopic(ctx.db, topicId);
+  if (!topic) throw notFound("topic_not_found");
+  const host = normalizeHost(rawHost);
+  const removed = host ? removeTopicHostRow(ctx.db, topicId, host) : false;
+  ctx.logger.info(removed ? "site_removed" : "site_remove_noop", {
+    topic_id: topicId,
+    title: topic.title,
+    host,
+  });
+  return listTopicHosts(ctx.db, topicId);
+}
+
+function normalizeHost(raw: string): string | null {
+  const trimmed = (raw || "").trim().toLowerCase();
+  if (!trimmed) return null;
+  const host = trimmed
+    .replace(/^[a-z]+:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/^\*\./, "")
+    .replace(/^www\./, "");
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(host)
+    ? host
+    : null;
 }
 
 async function embedPolicyLines(

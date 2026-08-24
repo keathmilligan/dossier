@@ -20,7 +20,6 @@ CREATE TABLE IF NOT EXISTS topics (
                             CHECK (status IN ('watching','active','drafting','shelved')),
   venues_json             TEXT NOT NULL DEFAULT '[]',
   auto_accept_confidence  REAL NOT NULL DEFAULT 0.85,
-  watching_confirmed      INTEGER NOT NULL DEFAULT 0,
   created_at              TEXT NOT NULL,
   updated_at              TEXT NOT NULL
 );
@@ -55,12 +54,12 @@ CREATE TABLE IF NOT EXISTS nodes (
   UNIQUE (topic_id, slug)
 );
 
-CREATE TABLE IF NOT EXISTS sessions (
-  id          TEXT PRIMARY KEY,
-  topic_ids   TEXT NOT NULL,
-  started_at  TEXT NOT NULL,
-  ended_at    TEXT,
-  paused      INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS topic_hosts (
+  id         TEXT PRIMARY KEY,
+  topic_id   TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  host       TEXT NOT NULL,
+  added_at   TEXT NOT NULL,
+  UNIQUE (topic_id, host)
 );
 
 CREATE TABLE IF NOT EXISTS items (
@@ -71,8 +70,7 @@ CREATE TABLE IF NOT EXISTS items (
   referrer        TEXT,
   captured_at     TEXT NOT NULL,
   dwell_ms        INTEGER NOT NULL DEFAULT 0,
-  source          TEXT NOT NULL CHECK (source IN ('session','watching','manual','pin')),
-  session_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  source          TEXT NOT NULL CHECK (source IN ('watching','manual','pin')),
   readable_text   TEXT,
   highlight_text  TEXT,
   origin          TEXT NOT NULL DEFAULT 'public'
