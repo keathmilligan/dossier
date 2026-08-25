@@ -27,10 +27,32 @@ button + button { margin-left: 6px; }
 .status { font-size: 14px; color: var(--muted); }
 .status.ok { color: var(--ok); }
 .status.bad { color: var(--danger); }
-.badge { font-size: 13px; padding: 2px 6px; border-radius: 999px; background: var(--card); }
+.badge { font-size: 13px; padding: 2px 6px; border-radius: 999px; background: var(--card); flex-shrink: 0; }
+.badge.badge-queued, .badge.badge-embedding, .badge.badge-judging, .badge.badge-extracting { color: var(--accent); }
+.badge.badge-filed { color: var(--ok); }
+.badge.badge-rejected, .badge.badge-dropped, .badge.badge-failed { color: var(--danger); }
+.badge.badge-proposed { color: var(--accent); }
+.badge.badge-inbox, .badge.badge-related { color: var(--muted); }
 .list { list-style: none; padding: 0; margin: 0; }
 .list li { padding: 8px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
 .list li.active { border-color: var(--accent); }
+.list li.in-flight { box-shadow: inset 3px 0 0 var(--accent); }
+.list li.in-flight .queue-head strong::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+  vertical-align: 1px;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.queue-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .list li.topic { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .list li.topic > span { flex: 1; min-width: 0; }
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }

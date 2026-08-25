@@ -117,7 +117,7 @@ Pin-this-page uses `activeTab` only. Adding a site asks for optional host access
 2. Open the side panel. Create a topic and chat until the policy and outline look right. **Accept the diff.** Nothing is captured against a topic with no accepted policy.
 3. Once a policy is accepted, browse to a site you want captured and click **Add this site** in the popup (or press the hotkey — set one at `chrome://extensions/shortcuts`, suggested `Ctrl+Shift+D` / `⌘⇧D`). The same button/hotkey removes it again; the side panel's **Sites** tab lists every site for a topic with a `×` to remove any of them, or a box to add one by typing its hostname. After an 8s dwell on an added site, the page is a capture candidate.
 4. Pause (`‖`) stops ingest immediately; assist still works.
-5. Review the queue (keep / refile / reject). `j`/`k` move, `enter` keeps, `x` rejects, `1`–`9` files into a section.
+5. Review **Filings** (keep / refile / reject). `j`/`k` move, `enter` keeps, `x` rejects, `1`–`9` files into a section. Rejected items are hidden unless you check **Show rejected**.
 6. Open the brief. Export Markdown when you want a file you can start writing from.
 7. On an HN thread, GitHub issue, or any page: open Assist. Copy a draft if you would send it. Pin an objection to turn it into inbox research. Dossier never clicks Send.
 

@@ -8,7 +8,6 @@ import { PROMPT_JUDGE } from "./prompts.js";
 import { newId, nowIso } from "./ids.js";
 import {
   acceptedPolicy,
-  deleteItem,
   enqueueJob,
   getFiling,
   getItem,
@@ -24,10 +23,14 @@ interface EmbedPayload {
   item_id: string;
   source: string;
   topic_ids: string[];
+  title?: string;
+  url?: string;
 }
 
 interface JudgePayload {
   item_id: string;
+  title?: string;
+  url?: string;
   topic_id: string;
 }
 
@@ -93,25 +96,26 @@ async function runEmbed(ctx: AppContext, payload: EmbedPayload): Promise<void> {
   const vec = await ctx.llm.embed(text);
   if (!vec) {
     if (payload.source === "watching") {
-      maybeDeleteOrphan(ctx, item.id);
+      for (const topicId of payload.topic_ids) {
+        rejectFiltered(ctx, item, topicId, "embed_failed");
+      }
     }
     return;
   }
   upsertItemEmbed(ctx.db, item.id, ctx.config.llm.embed_model, vec);
 
-  const survivors: string[] = [];
   for (const topicId of payload.topic_ids) {
-    const keep = shouldKeepForTopic(ctx, item.id, topicId, payload.source, vec);
-    if (!keep) {
-      ctx.db.prepare("DELETE FROM filings WHERE item_id = ? AND topic_id = ?").run(item.id, topicId);
+    const decision = shouldKeepForTopic(ctx, item.id, topicId, payload.source, vec);
+    if (!decision.keep) {
+      rejectFiltered(ctx, item, topicId, "filtered", decision);
       continue;
     }
-    survivors.push(topicId);
-    enqueueJob(ctx.db, "judge", { item_id: item.id, topic_id: topicId });
-  }
-
-  if (payload.source === "watching" && survivors.length === 0) {
-    maybeDeleteOrphan(ctx, item.id);
+    enqueueJob(ctx.db, "judge", {
+      item_id: item.id,
+      topic_id: topicId,
+      title: item.title,
+      url: item.url,
+    });
   }
 }
 
@@ -121,13 +125,13 @@ function shouldKeepForTopic(
   topicId: string,
   source: string,
   pageEmbed: number[],
-): boolean {
-  if (source === "manual" || source === "pin") return true;
+): { keep: boolean; include_score?: number; exclude_score?: number; score?: number } {
+  if (source === "manual" || source === "pin") return { keep: true };
   const policy = acceptedPolicy(ctx.db, topicId);
-  if (!policy) return false;
+  if (!policy) return { keep: false };
   const doc = parsePolicyYaml(policy.yaml_text);
   const item = getItem(ctx.db, itemId);
-  if (!item) return false;
+  if (!item) return { keep: false };
   const includeIds = policyIncludeOwnerIds(policy.id, doc.include.length);
   const excludeIds = policyExcludeOwnerIds(policy.id, doc.exclude.length);
   const result = cheapFilter({
@@ -141,14 +145,69 @@ function shouldKeepForTopic(
     includeMinCosine: ctx.config.filter.include_min_cosine,
     excludeMargin: ctx.config.filter.exclude_margin,
   });
-  return result.keep;
+  return result;
 }
 
-function maybeDeleteOrphan(ctx: AppContext, itemId: string): void {
-  const n = (
-    ctx.db.prepare("SELECT COUNT(*) AS n FROM filings WHERE item_id = ?").get(itemId) as { n: number }
-  ).n;
-  if (n === 0) deleteItem(ctx.db, itemId);
+function rejectFiltered(
+  ctx: AppContext,
+  item: { id: string; url: string },
+  topicId: string,
+  reason: string,
+  scores?: { include_score?: number; exclude_score?: number; score?: number },
+): void {
+  ctx.db
+    .prepare("UPDATE filings SET state = 'rejected', rationale = ? WHERE item_id = ? AND topic_id = ?")
+    .run(reason, item.id, topicId);
+  ctx.logger.info("capture_dropped", {
+    url: item.url,
+    source: "watching",
+    reason,
+    topic_id: topicId,
+    item_id: item.id,
+    include_score: scores?.include_score,
+    exclude_score: scores?.exclude_score,
+    score: scores?.score,
+  });
+}
+
+/** Re-run the cheap filter + judge for filings that were dropped by an older, too-strict filter. */
+export function requeueFilteredFilings(ctx: AppContext): number {
+  const rows = ctx.db
+    .prepare(
+      `SELECT f.item_id, f.topic_id, i.title, i.url, i.source
+       FROM filings f JOIN items i ON i.id = f.item_id
+       WHERE f.state = 'rejected' AND f.rationale IN ('filtered', 'embed_failed')`,
+    )
+    .all() as Array<{ item_id: string; topic_id: string; title: string; url: string; source: string }>;
+  if (rows.length === 0) return 0;
+  const byItem = new Map<string, { title: string; url: string; source: string; topic_ids: string[] }>();
+  for (const row of rows) {
+    const cur = byItem.get(row.item_id) ?? {
+      title: row.title,
+      url: row.url,
+      source: row.source,
+      topic_ids: [],
+    };
+    cur.topic_ids.push(row.topic_id);
+    byItem.set(row.item_id, cur);
+  }
+  ctx.db
+    .prepare(
+      `UPDATE filings SET state = 'inbox', rationale = NULL
+       WHERE state = 'rejected' AND rationale IN ('filtered', 'embed_failed')`,
+    )
+    .run();
+  for (const [itemId, payload] of byItem) {
+    enqueueJob(ctx.db, "embed", {
+      item_id: itemId,
+      source: payload.source,
+      topic_ids: payload.topic_ids,
+      title: payload.title,
+      url: payload.url,
+    });
+  }
+  ctx.logger.info("filings_requeued", { count: byItem.size });
+  return byItem.size;
 }
 
 async function runJudge(ctx: AppContext, payload: JudgePayload): Promise<void> {

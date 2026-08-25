@@ -22,12 +22,14 @@ import {
   allWatchedHosts,
   getTopic,
   listNodes,
+  listQueue,
   listTopicHosts,
   listTopics,
   listUserDenylist,
 } from "./store.js";
 import { newId, nowIso } from "./ids.js";
-import type { AssistRequest, CaptureBody, StructurePlanNode } from "./models.js";
+import type { AssistRequest, CaptureBody, FilingState, StructurePlanNode } from "./models.js";
+import { FILING_STATES, QUEUE_LIMIT } from "./models.js";
 
 export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get("/health", async () => {
@@ -120,18 +122,11 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get("/topics/:id/queue", async (req) => {
     const { id } = req.params as { id: string };
     if (!getTopic(ctx.db, id)) throw notFound("topic_not_found");
-    const q = req.query as { states?: string };
-    const states = (q.states ?? "inbox,proposed").split(",").map((s) => s.trim());
-    const ph = states.map(() => "?").join(",");
-    const rows = ctx.db
-      .prepare(
-        `SELECT f.*, i.title AS item_title, i.url, i.readable_text, i.highlight_text, i.captured_at
-         FROM filings f JOIN items i ON i.id = f.item_id
-         WHERE f.topic_id = ? AND f.state IN (${ph})
-         ORDER BY i.captured_at ASC`,
-      )
-      .all(id, ...states);
-    return { filings: rows, nodes: listNodes(ctx.db, id) };
+    const q = req.query as { states?: string; limit?: string; include_rejected?: string };
+    const states = q.states ? parseFilingStates(q.states) : null;
+    const limit = parseQueueLimit(q.limit);
+    const includeRejected = q.include_rejected === "1";
+    return { filings: listQueue(ctx.db, id, states, limit, includeRejected), nodes: listNodes(ctx.db, id) };
   });
 
   app.post("/topics/:id/chat", async (req) => {
@@ -291,6 +286,22 @@ function optNum(v: unknown): number | undefined {
 
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "topic";
+}
+
+function parseFilingStates(raw?: string): FilingState[] {
+  if (!raw?.trim()) return [...FILING_STATES];
+  const allowed = new Set<string>(FILING_STATES);
+  const states = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s): s is FilingState => allowed.has(s));
+  return states.length ? states : [...FILING_STATES];
+}
+
+function parseQueueLimit(raw?: string): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return QUEUE_LIMIT;
+  return Math.min(QUEUE_LIMIT, Math.max(1, Math.floor(n)));
 }
 
 type TopicStatus = import("./models.js").TopicStatus;

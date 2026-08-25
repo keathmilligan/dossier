@@ -28,10 +28,9 @@
         <div class="tabs" id="tabs">
           <button data-tab="chat" class="on">Chat</button>
           <button data-tab="sites">Sites</button>
-          <button data-tab="queue">Queue</button>
+          <button data-tab="queue">Filings</button>
           <button data-tab="brief">Brief</button>
           <button data-tab="policy">Policy</button>
-          <button data-tab="rejected">Rejected</button>
         </div>
         <div id="tab-chat">
           <div id="chat-log"></div>
@@ -60,7 +59,8 @@
           </div>
         </div>
         <div id="tab-queue" hidden>
-          <p class="status">j/k move · enter keep · x reject · 1–9 file to section</p>
+          <p class="status">newest first · in-flight highlighted · j/k move · enter keep · x reject · 1–9 file to section</p>
+          <label class="chk"><input id="show-rejected" type="checkbox" /> Show rejected</label>
           <ul id="queue" class="list"></ul>
         </div>
         <div id="tab-brief" hidden>
@@ -75,9 +75,7 @@
           <textarea id="policy-edit"></textarea>
           <button id="propose-yaml">Propose YAML</button>
         </div>
-        <div id="tab-rejected" hidden>
-          <ul id="rejected" class="list"></ul>
-        </div>
+
       </section>
     </main>
     <script type="module" src="./panel.ts"></script>

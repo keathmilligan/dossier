@@ -3,6 +3,8 @@ export type NodeKind = "inbox" | "section";
 export type ItemSource = "watching" | "manual" | "pin";
 export type ItemOrigin = "public" | "private";
 export type FilingState = "inbox" | "proposed" | "filed" | "rejected" | "related";
+export const FILING_STATES: FilingState[] = ["inbox", "proposed", "filed", "rejected", "related"];
+export const QUEUE_LIMIT = 100;
 export type Verdict = "keep" | "demote" | "reject" | "reread";
 export type ExtractKind = "claim" | "quote" | "entity" | "note" | "architecture";
 export type JobKind = "embed" | "judge" | "extract";
@@ -90,6 +92,19 @@ export interface Filing {
   rank_in_node: number | null;
   pinned: number;
   verdict: Verdict | null;
+}
+
+export interface QueueFiling extends Omit<Filing, "state"> {
+  state: FilingState | "dropped" | "failed" | "queued" | "embedding" | "judging" | "extracting";
+  item_title: string;
+  url: string;
+  readable_text: string | null;
+  highlight_text: string | null;
+  captured_at: string;
+  in_flight: boolean;
+  job_kind: JobKind | null;
+  job_state: JobState | null;
+  reviewable: boolean;
 }
 
 export interface CaptureBody {

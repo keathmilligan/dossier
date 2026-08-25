@@ -10,7 +10,7 @@ import {
 import { openDb, getMeta, setMeta } from "./db.js";
 import { OllamaClient } from "./ollama.js";
 import { buildApp } from "./app.js";
-import { processQueue } from "./jobs.js";
+import { processQueue, requeueFilteredFilings } from "./jobs.js";
 import { createLogger } from "./logger.js";
 import type { AppContext } from "./context.js";
 
@@ -50,6 +50,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void close());
   process.on("SIGTERM", () => void close());
 
+  requeueFilteredFilings(ctx);
   await app.listen({ host, port });
   logger.info("service_started", {
     url: `http://${host}:${port}`,

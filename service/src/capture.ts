@@ -99,6 +99,8 @@ export function ingestCapture(ctx: AppContext, body: CaptureBody): CaptureResult
     item_id: item.id,
     source: body.source,
     topic_ids: topics.map((t) => t.id),
+    title: item.title,
+    url: item.url,
   });
 
   log("capture_ingested", {

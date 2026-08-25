@@ -1,12 +1,17 @@
 import type { Database as Db } from "better-sqlite3";
 import type {
   Filing,
+  FilingState,
   Item,
+  JobKind,
+  JobState,
   NodeRow,
   Policy,
+  QueueFiling,
   Topic,
   TopicHost,
 } from "./models.js";
+import { FILING_STATES, QUEUE_LIMIT } from "./models.js";
 import { newId, nowIso } from "./ids.js";
 import { deleteFts, upsertFts } from "./db.js";
 import { decodeVec, encodeVec } from "./embeddings.js";
@@ -76,6 +81,221 @@ export function getFiling(db: Db, itemId: string, topicId: string): Filing | und
 
 export function getFilingById(db: Db, id: string): Filing | undefined {
   return db.prepare("SELECT * FROM filings WHERE id = ?").get(id) as Filing | undefined;
+}
+
+interface JobPayload {
+  item_id?: string;
+  topic_id?: string;
+  topic_ids?: string[];
+  title?: string;
+  url?: string;
+  source?: string;
+}
+
+interface JobRow {
+  id: string;
+  kind: JobKind;
+  state: JobState;
+  payload: string;
+  error: string | null;
+  created_at: string;
+}
+
+type FilingListRow = Filing & {
+  item_title: string;
+  url: string;
+  readable_text: string | null;
+  highlight_text: string | null;
+  captured_at: string;
+};
+
+export function listQueue(
+  db: Db,
+  topicId: string,
+  states: FilingState[] | null = null,
+  limit = QUEUE_LIMIT,
+  includeRejected = false,
+): QueueFiling[] {
+  const cap = Math.min(QUEUE_LIMIT, Math.max(1, limit));
+  if (states && states.length > 0 && states.length < FILING_STATES.length) {
+    return listQueueFilings(db, topicId, states, cap);
+  }
+  return listQueueHistory(db, topicId, cap, includeRejected);
+}
+
+/** Filtered filing view (Rejected tab). */
+export function listQueueFilings(
+  db: Db,
+  topicId: string,
+  states: FilingState[],
+  limit = QUEUE_LIMIT,
+): QueueFiling[] {
+  const wanted = states.length ? states : FILING_STATES;
+  const ph = wanted.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT f.*, i.title AS item_title, i.url, i.readable_text, i.highlight_text, i.captured_at
+       FROM filings f JOIN items i ON i.id = f.item_id
+       WHERE f.topic_id = ? AND f.state IN (${ph})
+       ORDER BY i.captured_at DESC
+       LIMIT ?`,
+    )
+    .all(topicId, ...wanted, limit) as FilingListRow[];
+  const inflight = inFlightByItem(db, topicId);
+  return rows.map((row) => decorateFiling(row, inflight.get(row.item_id)));
+}
+
+/** Jobs + filings: processed, queued, and in-flight items from the database. */
+export function listQueueHistory(
+  db: Db,
+  topicId: string,
+  limit = QUEUE_LIMIT,
+  includeRejected = false,
+): QueueFiling[] {
+  const byItem = new Map<string, QueueFiling>();
+  const inflight = inFlightByItem(db, topicId);
+
+  const jobs = db
+    .prepare(
+      `SELECT id, kind, state, payload, error, created_at FROM jobs
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(limit * 4) as JobRow[];
+
+  for (const job of jobs) {
+    const payload = parseJobPayload(job.payload);
+    if (!payload?.item_id || !jobMatchesTopic(job.kind, payload, topicId)) continue;
+    if (byItem.has(payload.item_id)) continue;
+    const row = rowFromJob(db, topicId, job, payload);
+    if (!includeRejected && isRejectedRow(row) && !row.in_flight) continue;
+    byItem.set(payload.item_id, row);
+  }
+
+  const filings = db
+    .prepare(
+      `SELECT f.*, i.title AS item_title, i.url, i.readable_text, i.highlight_text, i.captured_at
+       FROM filings f JOIN items i ON i.id = f.item_id
+       WHERE f.topic_id = ?${includeRejected ? "" : " AND f.state != 'rejected'"}
+       ORDER BY i.captured_at DESC
+       LIMIT ?`,
+    )
+    .all(topicId, limit) as FilingListRow[];
+
+  for (const row of filings) {
+    const existing = byItem.get(row.item_id);
+    if (existing) {
+      existing.id = row.id;
+      existing.node_id = row.node_id;
+      existing.score = row.score;
+      existing.rationale = row.rationale ?? existing.rationale;
+      existing.rank_in_node = row.rank_in_node;
+      existing.pinned = row.pinned;
+      existing.verdict = row.verdict;
+      existing.item_title = row.item_title || existing.item_title;
+      existing.url = row.url || existing.url;
+      existing.readable_text = row.readable_text;
+      existing.highlight_text = row.highlight_text;
+      existing.captured_at = row.captured_at || existing.captured_at;
+      if (!existing.in_flight) existing.state = row.state;
+      existing.reviewable = !existing.in_flight;
+    } else {
+      byItem.set(row.item_id, decorateFiling(row, inflight.get(row.item_id)));
+    }
+  }
+
+  return [...byItem.values()]
+    .filter((row) => includeRejected || row.in_flight || !isRejectedRow(row))
+    .sort((a, b) => (a.captured_at < b.captured_at ? 1 : a.captured_at > b.captured_at ? -1 : 0))
+    .slice(0, limit);
+}
+
+function isRejectedRow(row: QueueFiling): boolean {
+  return row.state === "rejected" || row.state === "dropped";
+}
+
+function decorateFiling(
+  row: FilingListRow,
+  job?: { kind: JobKind; state: JobState },
+): QueueFiling {
+  const inFlight = Boolean(job);
+  return {
+    ...row,
+    in_flight: inFlight,
+    job_kind: job?.kind ?? null,
+    job_state: job?.state ?? null,
+    reviewable: !inFlight,
+  };
+}
+
+function rowFromJob(db: Db, topicId: string, job: JobRow, payload: JobPayload): QueueFiling {
+  const item = payload.item_id ? getItem(db, payload.item_id) : undefined;
+  const filing = payload.item_id ? getFiling(db, payload.item_id, topicId) : undefined;
+  const inFlight = job.state === "queued" || job.state === "running";
+  return {
+    id: filing?.id ?? job.id,
+    item_id: payload.item_id ?? job.id,
+    topic_id: topicId,
+    node_id: filing?.node_id ?? null,
+    state: queueState(job, filing),
+    score: filing?.score ?? null,
+    rationale: filing?.rationale ?? job.error ?? null,
+    rank_in_node: filing?.rank_in_node ?? null,
+    pinned: filing?.pinned ?? 0,
+    verdict: filing?.verdict ?? null,
+    item_title: item?.title || payload.title || "Dropped page",
+    url: item?.url || payload.url || "",
+    readable_text: item?.readable_text ?? null,
+    highlight_text: item?.highlight_text ?? null,
+    captured_at: item?.captured_at || job.created_at,
+    in_flight: inFlight,
+    job_kind: job.kind,
+    job_state: job.state,
+    reviewable: Boolean(filing) && !inFlight,
+  };
+}
+
+function queueState(job: JobRow, filing: Filing | undefined): QueueFiling["state"] {
+  if (job.state === "queued") return "queued";
+  if (job.state === "running") {
+    if (job.kind === "embed") return "embedding";
+    if (job.kind === "judge") return "judging";
+    return "extracting";
+  }
+  if (job.state === "failed") return "failed";
+  return filing?.state ?? "dropped";
+}
+
+function parseJobPayload(raw: string): JobPayload | null {
+  try {
+    return JSON.parse(raw) as JobPayload;
+  } catch {
+    return null;
+  }
+}
+
+function jobMatchesTopic(kind: JobKind, payload: JobPayload, topicId: string): boolean {
+  if (kind === "judge") return !payload.topic_id || payload.topic_id === topicId;
+  if (payload.topic_ids) return payload.topic_ids.includes(topicId);
+  return !payload.topic_id || payload.topic_id === topicId;
+}
+
+function inFlightByItem(
+  db: Db,
+  topicId: string,
+): Map<string, { kind: JobKind; state: JobState }> {
+  const jobs = db
+    .prepare("SELECT kind, state, payload FROM jobs WHERE state IN ('queued', 'running')")
+    .all() as Array<{ kind: JobKind; state: JobState; payload: string }>;
+  const best = new Map<string, { kind: JobKind; state: JobState; rank: number }>();
+  for (const job of jobs) {
+    const payload = parseJobPayload(job.payload);
+    if (!payload?.item_id || !jobMatchesTopic(job.kind, payload, topicId)) continue;
+    const rank = (job.state === "running" ? 10 : 0) + (job.kind === "judge" ? 2 : job.kind === "embed" ? 1 : 0);
+    const prev = best.get(payload.item_id);
+    if (!prev || rank > prev.rank) best.set(payload.item_id, { kind: job.kind, state: job.state, rank });
+  }
+  return new Map([...best].map(([id, j]) => [id, { kind: j.kind, state: j.state }]));
 }
 
 export function listTopicHosts(db: Db, topicId: string): TopicHost[] {

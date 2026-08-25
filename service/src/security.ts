@@ -64,6 +64,9 @@ export function registerSecurity(
       reply.header("Access-Control-Allow-Origin", origin);
       reply.header("Vary", "Origin");
     }
+    // Drop keep-alive so a dossierd restart does not leave the extension
+    // holding a dead socket (Chromium will otherwise refuse to reconnect).
+    reply.header("Connection", "close");
 
     const token = bearerFrom(header(req, "authorization"));
     if (!tokenMatches(token, opts.token)) {

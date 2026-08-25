@@ -22,7 +22,7 @@ describe("filter", () => {
     expect(r.keep).toBe(true);
   });
 
-  it("drops when exclude is closer", () => {
+  it("drops when include cosine is below the threshold", () => {
     const r = cheapFilter({
       title: "Recall explainer",
       host: "example.com",
@@ -35,5 +35,36 @@ describe("filter", () => {
       excludeMargin: 0.04,
     });
     expect(r.keep).toBe(false);
+  });
+
+  it("keeps an on-topic page even when exclude cosine is close", () => {
+    const r = cheapFilter({
+      title: "Enhancing LLMs in Predictive Political QA",
+      host: "arxiv.org",
+      text: "large language model privacy",
+      pageEmbed: [0.7, 0.65, 0],
+      includeEmbeds: [[1, 0, 0]],
+      excludeEmbeds: [[0, 1, 0]],
+      includeTerms: ["LLM news"],
+      includeMinCosine: 0.32,
+      excludeMargin: 0.04,
+    });
+    expect(r.include_score).toBeGreaterThan(0.32);
+    expect(r.keep).toBe(true);
+  });
+
+  it("counts a keyword hit on a token inside an include phrase", () => {
+    const r = cheapFilter({
+      title: "Enhancing LLMs in Predictive Political QA",
+      host: "arxiv.org",
+      text: "large language models",
+      pageEmbed: [0, 0, 1],
+      includeEmbeds: [include],
+      excludeEmbeds: [],
+      includeTerms: ["LLM news"],
+      includeMinCosine: 0.32,
+      excludeMargin: 0.04,
+    });
+    expect(r.keyword_bonus).toBeGreaterThan(0);
   });
 });

@@ -25,7 +25,13 @@ export function keywordHits(haystack: string, terms: string[]): number {
   let n = 0;
   for (const term of terms) {
     const t = term.trim().toLowerCase();
-    if (t.length >= 3 && h.includes(t)) n += 1;
+    if (!t) continue;
+    if (t.length >= 3 && h.includes(t)) {
+      n += 1;
+      continue;
+    }
+    const words = t.split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+    if (words.some((w) => h.includes(w))) n += 1;
   }
   return n;
 }
@@ -35,10 +41,12 @@ export function cheapFilter(input: FilterInput): FilterResult {
   const exclude_score = maxCosine(input.pageEmbed, input.excludeEmbeds);
   const hay = `${input.title} ${input.host} ${input.text.slice(0, 2000)}`;
   const keyword_bonus = 0.05 * keywordHits(hay, input.includeTerms);
-  const score = include_score + keyword_bonus - exclude_score;
-  const keep =
-    score >= input.includeMinCosine &&
-    include_score >= exclude_score + input.excludeMargin;
+  // Recall-oriented pre-judge gate. Exclude is applied by the judge — overlapping
+  // include/exclude phrases (e.g. "LLM news" vs "General AI") are too close in
+  // embedding space for a margin check to be safe.
+  const score = include_score + keyword_bonus;
+  const keep = score >= input.includeMinCosine;
+  void input.excludeMargin;
   return { keep, score, include_score, exclude_score, keyword_bonus };
 }
 

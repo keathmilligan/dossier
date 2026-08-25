@@ -10,9 +10,10 @@ import {
   removeTopicHost,
 } from "../src/topics.js";
 import { ingestCapture } from "../src/capture.js";
-import { countItems, getTopic, inboxNode, listNodes, listTopicHosts } from "../src/store.js";
+import { countItems, enqueueJob, getTopic, inboxNode, listNodes, listTopicHosts } from "../src/store.js";
 import { encodeVec, hashEmbed } from "../src/embeddings.js";
 import { newId } from "../src/ids.js";
+import { QUEUE_LIMIT } from "../src/models.js";
 
 describe("capture_auth", () => {
   it("rejects missing token and evil origin", async () => {
@@ -43,6 +44,7 @@ describe("capture_auth", () => {
     });
     expect(ok.statusCode).toBe(200);
     expect(ok.json().ok).toBe(true);
+    expect(ok.headers.connection).toBe("close");
   });
 });
 
@@ -108,7 +110,10 @@ describe("manual_keeps / watching_drops", () => {
       readable_text: "totally unrelated page body about cooking ".repeat(10),
     });
     await drain(ctx);
-    expect(countItems(ctx.db)).toBe(0);
+    expect(countItems(ctx.db)).toBe(1);
+    const watchFiling = ctx.db.prepare("SELECT * FROM filings").get() as { state: string; rationale: string };
+    expect(watchFiling.state).toBe("rejected");
+    expect(watchFiling.rationale).toBe("filtered");
   });
 });
 
@@ -184,6 +189,118 @@ describe("hosts_api", () => {
     const removed = await api(app, "DELETE", `/topics/${topic.id}/hosts/${encodeURIComponent("example.org")}`);
     expect(removed.statusCode).toBe(200);
     expect(removed.json().hosts.map((h: { host: string }) => h.host)).not.toContain("example.org");
+  });
+});
+
+describe("queue_api", () => {
+  it("returns all states newest-first, caps at 100, and marks in-flight jobs", async () => {
+    const { app, ctx } = makeApp();
+    const { topic } = await seedAccepted(ctx);
+    const inbox = inboxNode(ctx.db, topic.id);
+
+    const titles = ["oldest filed", "middle rejected", "newest inbox"];
+    const states = ["filed", "rejected", "inbox"] as const;
+    const ids: string[] = [];
+    for (let i = 0; i < titles.length; i++) {
+      const itemId = newId();
+      ids.push(itemId);
+      ctx.db
+        .prepare(
+          `INSERT INTO items(id, url, url_normalized, title, captured_at, source, origin, readable_text)
+           VALUES (?, ?, ?, ?, ?, 'manual', 'public', ?)`,
+        )
+        .run(
+          itemId,
+          `https://example.com/${i}`,
+          `https://example.com/${i}`,
+          titles[i],
+          `2026-01-0${i + 1}T00:00:00.000Z`,
+          "x".repeat(250),
+        );
+      ctx.db
+        .prepare(
+          `INSERT INTO filings(id, item_id, topic_id, node_id, state, pinned) VALUES (?, ?, ?, ?, ?, 0)`,
+        )
+        .run(newId(), itemId, topic.id, inbox.id, states[i]);
+    }
+
+    enqueueJob(ctx.db, "embed", { item_id: ids[2], source: "manual", topic_ids: [topic.id] });
+
+    const listed = await api(app, "GET", `/topics/${topic.id}/queue`);
+    expect(listed.statusCode).toBe(200);
+    const filings = listed.json().filings as Array<{
+      item_title: string;
+      state: string;
+      in_flight: boolean;
+      job_kind: string | null;
+      job_state: string | null;
+    }>;
+    expect(filings.map((f) => f.item_title)).toEqual(["newest inbox", "oldest filed"]);
+    expect(filings.map((f) => f.state)).toEqual(["queued", "filed"]);
+    expect(filings[0]).toMatchObject({ in_flight: true, job_kind: "embed", job_state: "queued" });
+    expect(filings[1]!.in_flight).toBe(false);
+
+    const withRejected = await api(app, "GET", `/topics/${topic.id}/queue?include_rejected=1`);
+    expect(withRejected.json().filings.map((f: { item_title: string }) => f.item_title)).toEqual([
+      "newest inbox",
+      "middle rejected",
+      "oldest filed",
+    ]);
+
+    const goneId = enqueueJob(ctx.db, "embed", {
+      item_id: "gone-item",
+      source: "watching",
+      topic_ids: [topic.id],
+      title: "Filtered arXiv page",
+      url: "https://arxiv.org/abs/dropped",
+    });
+    ctx.db.prepare("UPDATE jobs SET state = 'done' WHERE id = ?").run(goneId);
+    const hiddenDropped = await api(app, "GET", `/topics/${topic.id}/queue`);
+    expect(
+      (hiddenDropped.json().filings as Array<{ item_title: string }>).some((f) => f.item_title === "Filtered arXiv page"),
+    ).toBe(false);
+    const withDropped = await api(app, "GET", `/topics/${topic.id}/queue?include_rejected=1`);
+    const dropped = (withDropped.json().filings as Array<{ item_title: string; state: string; url: string }>).find(
+      (f) => f.item_title === "Filtered arXiv page",
+    );
+    expect(dropped).toMatchObject({
+      state: "dropped",
+      url: "https://arxiv.org/abs/dropped",
+    });
+    ctx.db.prepare("DELETE FROM jobs WHERE payload LIKE '%gone-item%'").run();
+
+    const rejectedOnly = await api(app, "GET", `/topics/${topic.id}/queue?states=rejected`);
+    expect(rejectedOnly.json().filings.map((f: { item_title: string }) => f.item_title)).toEqual([
+      "middle rejected",
+    ]);
+
+    for (let i = 0; i < QUEUE_LIMIT + 5; i++) {
+      const itemId = newId();
+      ctx.db
+        .prepare(
+          `INSERT INTO items(id, url, url_normalized, title, captured_at, source, origin, readable_text)
+           VALUES (?, ?, ?, ?, ?, 'manual', 'public', 'body')`,
+        )
+        .run(
+          itemId,
+          `https://example.com/extra/${i}`,
+          `https://example.com/extra/${i}`,
+          `extra ${i}`,
+          new Date(Date.UTC(2026, 1, 1, 0, 0, i)).toISOString(),
+        );
+      ctx.db
+        .prepare(
+          `INSERT INTO filings(id, item_id, topic_id, node_id, state, pinned) VALUES (?, ?, ?, ?, 'inbox', 0)`,
+        )
+        .run(newId(), itemId, topic.id, inbox.id);
+    }
+    const capped = await api(app, "GET", `/topics/${topic.id}/queue`);
+    const cappedFilings = capped.json().filings as Array<{ item_title: string; captured_at: string }>;
+    expect(cappedFilings).toHaveLength(QUEUE_LIMIT);
+    expect(cappedFilings[0]!.item_title).toBe(`extra ${QUEUE_LIMIT + 4}`);
+    for (let i = 1; i < cappedFilings.length; i++) {
+      expect(cappedFilings[i - 1]!.captured_at >= cappedFilings[i]!.captured_at).toBe(true);
+    }
   });
 });
 

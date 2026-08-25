@@ -1,4 +1,5 @@
 import { normalizeHost, requestHostPermission } from "../sites";
+import { send } from "../runtime";
 
 interface TopicSummary {
   id: string;
@@ -10,15 +11,6 @@ interface SiteStatus {
   host: string | null;
   watched: boolean;
   hosts: Array<{ host: string }>;
-}
-
-function send<T = unknown>(msg: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(msg, (resp) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(resp as T);
-    });
-  });
 }
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -195,6 +187,9 @@ $("toggle-site").addEventListener("click", async () => {
   }
 });
 
-void refresh();
+void refresh().catch(() => undefined);
+window.setInterval(() => {
+  void refresh().catch(() => undefined);
+}, 2500);
 
 export {};

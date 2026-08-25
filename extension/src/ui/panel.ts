@@ -1,4 +1,5 @@
 import { normalizeHost, requestHostPermission } from "../sites";
+import { send } from "../runtime";
 
 type Topic = { id: string; title: string; intent: string; has_policy: boolean };
 type TopicHost = { id: string; host: string; added_at: string };
@@ -13,7 +14,14 @@ type Filing = {
   rationale: string | null;
   node_id: string | null;
   score: number | null;
+  captured_at?: string;
+  in_flight?: boolean;
+  job_kind?: string | null;
+  job_state?: string | null;
+  reviewable?: boolean;
 };
+
+const QUEUE_POLL_MS = 2000;
 
 let topic: Topic | null = null;
 let threadId: string | null = null;
@@ -23,15 +31,7 @@ let nodes: OutlineNode[] = [];
 let queue: Filing[] = [];
 let qIndex = 0;
 let tab = "chat";
-
-function send<T = unknown>(msg: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(msg, (resp) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(resp as T);
-    });
-  });
-}
+let queueTimer: number | null = null;
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await send<{ data?: T; error?: string; detail?: string }>({
@@ -158,32 +158,55 @@ async function removeSite(host: string): Promise<void> {
   renderSites(r.hosts ?? []);
 }
 
+function showRejected(): boolean {
+  return ($("show-rejected") as HTMLInputElement).checked;
+}
+
+function queuePath(): string {
+  return showRejected()
+    ? `/topics/${topic!.id}/queue?include_rejected=1`
+    : `/topics/${topic!.id}/queue`;
+}
+
 async function renderTab(): Promise<void> {
-  for (const name of ["chat", "sites", "queue", "brief", "policy", "rejected"]) {
+  for (const name of ["chat", "sites", "queue", "brief", "policy"]) {
     show(`tab-${name}`, tab === name);
     const btn = document.querySelector<HTMLButtonElement>(`#tabs [data-tab="${name}"]`);
     if (btn) btn.classList.toggle("on", tab === name);
   }
   if (!topic) return;
   if (tab === "sites") await loadSites();
-  if (tab === "queue") await loadQueue("inbox,proposed", "queue");
-  if (tab === "rejected") await loadQueue("rejected", "rejected");
+  if (tab === "queue") {
+    startQueuePoll();
+    await loadQueue();
+  } else {
+    stopQueuePoll();
+  }
   if (tab === "brief") {
     const data = await call<{ markdown: string }>("GET", `/topics/${topic.id}/brief`);
     $("brief").textContent = data.markdown;
   }
 }
 
-async function loadQueue(states: string, elId: string): Promise<void> {
+async function loadQueue(): Promise<void> {
   if (!topic) return;
-  const data = await call<{ filings: Filing[]; nodes: OutlineNode[] }>(
-    "GET",
-    `/topics/${topic.id}/queue?states=${states}`,
-  );
+  const keepId = queue[qIndex]?.id;
+  const data = await call<{ filings: Filing[]; nodes: OutlineNode[] }>("GET", queuePath());
   nodes = data.nodes;
   queue = data.filings;
-  qIndex = 0;
-  paintQueue(elId);
+  const kept = keepId ? queue.findIndex((f) => f.id === keepId) : -1;
+  qIndex = kept >= 0 ? kept : 0;
+  paintQueue("queue");
+}
+
+function filingStatus(f: Filing): string {
+  if (f.in_flight && f.job_kind) {
+    if (f.job_state === "queued") return "queued";
+    if (f.job_kind === "embed") return "embedding";
+    if (f.job_kind === "judge") return "judging";
+    return f.job_kind;
+  }
+  return f.state;
 }
 
 function paintQueue(elId: string): void {
@@ -192,16 +215,39 @@ function paintQueue(elId: string): void {
   queue.forEach((f, i) => {
     const li = document.createElement("li");
     if (i === qIndex) li.classList.add("active");
+    if (f.in_flight) li.classList.add("in-flight");
+    const status = filingStatus(f);
     const snip = (f.highlight_text || f.rationale || f.readable_text || "").slice(0, 240);
-    li.innerHTML = `<strong>${escapeHtml(f.item_title)}</strong> <span class="badge">${f.state}</span>
-      <div class="snippet">${escapeHtml(snip)}</div>
-      <a href="${escapeHtml(f.url)}" target="_blank" rel="noreferrer">${escapeHtml(f.url)}</a>`;
+    const when = f.captured_at ? escapeHtml(new Date(f.captured_at).toLocaleString()) : "";
+    const link = f.url
+      ? `<a href="${escapeHtml(f.url)}" target="_blank" rel="noreferrer">${escapeHtml(f.url)}</a>`
+      : "";
+    li.innerHTML = `<div class="queue-head">
+        <strong>${escapeHtml(f.item_title)}</strong>
+        <span class="badge badge-${escapeHtml(status)}">${escapeHtml(status)}</span>
+      </div>
+      ${snip ? `<div class="snippet">${escapeHtml(snip)}</div>` : ""}
+      ${link}
+      ${when ? `<div class="hint">${when}</div>` : ""}`;
     li.addEventListener("click", () => {
       qIndex = i;
       paintQueue(elId);
     });
     ul.appendChild(li);
   });
+}
+
+function startQueuePoll(): void {
+  stopQueuePoll();
+  queueTimer = window.setInterval(() => {
+    if (tab === "queue" && topic) void loadQueue().catch(() => undefined);
+  }, QUEUE_POLL_MS);
+}
+
+function stopQueuePoll(): void {
+  if (queueTimer == null) return;
+  clearInterval(queueTimer);
+  queueTimer = null;
 }
 
 function escapeHtml(s: string): string {
@@ -218,6 +264,7 @@ $("create").addEventListener("click", async () => {
 
 $("back").addEventListener("click", () => {
   topic = null;
+  stopQueuePoll();
   show("topic-view", false);
   show("topics-view", true);
   void loadTopics();
@@ -235,6 +282,7 @@ async function removeTopic(t: Topic): Promise<void> {
     threadId = null;
     proposalId = null;
     structurePlan = null;
+    stopQueuePoll();
     show("topic-view", false);
     show("topics-view", true);
   }
@@ -326,6 +374,10 @@ $("propose-yaml").addEventListener("click", async () => {
   void renderTab();
 });
 
+$("show-rejected").addEventListener("change", () => {
+  if (tab === "queue") void loadQueue();
+});
+
 $("add-host-btn").addEventListener("click", () => void addSite());
 $("add-host").addEventListener("keydown", (e) => {
   if (e.key === "Enter") void addSite();
@@ -367,20 +419,47 @@ document.addEventListener("keydown", (e) => {
 async function verdict(action: string, node_id?: string): Promise<void> {
   const f = queue[qIndex];
   if (!f || !topic) return;
+  if (f.in_flight || f.reviewable === false) return;
   await call("POST", `/filings/${f.id}/verdict`, { action, node_id });
-  await loadQueue("inbox,proposed", "queue");
+  await loadQueue();
 }
 
-void (async () => {
+const HEALTH_POLL_MS = 2500;
+let connected = false;
+
+async function syncHealth(): Promise<boolean> {
   try {
     const h = await send<{ ok?: boolean; llm?: boolean; error?: string }>({ type: "health" });
-    $("health").textContent = h.error ? "service not running" : h.llm ? "healthy · llm" : "healthy";
-    $("health").className = h.error ? "status bad" : "status ok";
+    if (h.error) {
+      $("health").textContent = "service not running";
+      $("health").className = "status bad";
+      return false;
+    }
+    $("health").textContent = h.llm ? "healthy · llm" : "healthy";
+    $("health").className = "status ok";
+    return true;
   } catch {
     $("health").textContent = "service not running";
     $("health").className = "status bad";
+    return false;
   }
-  await loadTopics();
+}
+
+async function onConnectionChange(ok: boolean): Promise<void> {
+  const was = connected;
+  connected = ok;
+  if (ok && !was) {
+    if (!topic) await loadTopics().catch(() => undefined);
+    else await renderTab().catch(() => undefined);
+  }
+}
+
+void (async () => {
+  connected = await syncHealth();
+  if (connected) await loadTopics().catch(() => undefined);
+  window.setInterval(() => {
+    void syncHealth().then(onConnectionChange);
+  }, HEALTH_POLL_MS);
 })();
 
 export {};
