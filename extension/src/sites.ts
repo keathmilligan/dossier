@@ -40,7 +40,7 @@ export function hostPermissionOrigins(host: string): string[] {
 
 /**
  * Prompt for host access. Must be the first await in a user-gesture handler
- * (popup/panel click, or a command). Returns false if the host is invalid or
+ * (panel click, or a command). Returns false if the host is invalid or
  * the user declined.
  */
 export async function requestHostPermission(rawHost: string): Promise<boolean> {

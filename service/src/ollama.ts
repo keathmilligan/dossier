@@ -14,7 +14,6 @@ export interface ToolSpec {
 
 export interface LlmClient {
   health(): Promise<boolean>;
-  embed(text: string): Promise<number[] | null>;
   chat(opts: {
     system: string;
     messages: ChatMessage[];
@@ -26,7 +25,6 @@ export interface LlmClient {
 export interface OllamaOptions {
   baseUrl: string;
   chatModel: string;
-  embedModel: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
 }
@@ -41,42 +39,6 @@ export class OllamaClient implements LlmClient {
       return res.ok;
     } catch {
       return false;
-    }
-  }
-
-  async embed(text: string): Promise<number[] | null> {
-    const started = Date.now();
-    const input = text.slice(0, 8000);
-    try {
-      const res = await this.timedFetch(
-        `${this.opts.baseUrl}/embeddings`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model: this.opts.embedModel,
-            input,
-          }),
-        },
-        Math.min(this.opts.timeoutMs, 8000),
-      );
-      const ms = Date.now() - started;
-      if (!res.ok) {
-        const err = await res.text().catch(() => "");
-        console.log(`llm embed error model=${this.opts.embedModel} chars=${input.length} status=${res.status} ms=${ms} ${snip(err)}`);
-        return null;
-      }
-      const body = (await res.json()) as { data?: Array<{ embedding: number[] }> };
-      const vec = body.data?.[0]?.embedding ?? null;
-      console.log(
-        `llm embed ok model=${this.opts.embedModel} chars=${input.length} dim=${vec?.length ?? 0} ms=${ms} ${snip(input, 160)}`,
-      );
-      return vec;
-    } catch (err) {
-      console.log(
-        `llm embed error model=${this.opts.embedModel} chars=${input.length} ms=${Date.now() - started} ${errMsg(err)}`,
-      );
-      return null;
     }
   }
 

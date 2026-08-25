@@ -15,7 +15,6 @@ interface ExtState {
 interface TopicSummary {
   id: string;
   title: string;
-  has_policy: boolean;
 }
 
 const nav = new Map<number, { url: string; startedAt: number; captured: boolean; timer?: number }>();
@@ -185,8 +184,16 @@ async function maybeCapture(tabId: number, url: string): Promise<void> {
   }
 }
 
+const openPanels = new Set<number>();
+
+function markPanel(windowId: number, open: boolean): void {
+  if (open) openPanels.add(windowId);
+  else openPanels.delete(windowId);
+}
+
+void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({ id: "file-page", title: "File this page in Dossier", contexts: ["page"] });
   chrome.contextMenus.create({ id: "save-highlight", title: "Save highlight to Dossier", contexts: ["selection"] });
   chrome.contextMenus.create({ id: "assist", title: "Dossier: assist with this thread", contexts: ["page"] });
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
@@ -194,6 +201,35 @@ chrome.runtime.onInstalled.addListener(() => {
   void ensureToken();
   void refreshWatchedHosts();
 });
+
+chrome.action.onClicked.addListener((tab) => {
+  const tabId = tab.id;
+  const windowId = tab.windowId;
+  if (tabId === undefined || windowId === undefined) return;
+  if (openPanels.has(windowId)) {
+    void closeSidePanel(tabId, windowId);
+    return;
+  }
+  // First call in this gesture must be open() or Chrome drops it.
+  void chrome.sidePanel.open({ tabId }).then(() => markPanel(windowId, true));
+});
+
+async function closeSidePanel(tabId: number, windowId: number): Promise<void> {
+  const closer = (
+    chrome.sidePanel as typeof chrome.sidePanel & {
+      close?: (opts: { tabId: number }) => Promise<void>;
+    }
+  ).close;
+  try {
+    if (closer) await closer.call(chrome.sidePanel, { tabId });
+    else {
+      await chrome.sidePanel.setOptions({ tabId, enabled: false });
+      await chrome.sidePanel.setOptions({ tabId, enabled: true, path: "src/ui/panel.html" });
+    }
+  } finally {
+    markPanel(windowId, false);
+  }
+}
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HOSTS_ALARM) void refreshWatchedHosts().then(() => updateBadge());
@@ -232,7 +268,6 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab?.id) return;
-  if (info.menuItemId === "file-page") void pinTab(tab);
   if (info.menuItemId === "save-highlight") {
     void sendCapture({
       url: tab.url,
@@ -245,20 +280,6 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
   if (info.menuItemId === "assist") void injectAssist(tab.id);
 });
-
-async function pinTab(tab: chrome.tabs.Tab): Promise<unknown> {
-  if (!tab.id || !tab.url) throw new Error("no tab");
-  if (tab.incognito) throw new ApiError(400, "incognito");
-  const extracted = await extractTab(tab.id);
-  return sendCapture({
-    url: extracted?.url ?? tab.url,
-    title: extracted?.title ?? tab.title,
-    referrer: extracted?.referrer,
-    source: "pin",
-    readable_text: extracted?.readable_text ?? "",
-    incognito: false,
-  });
-}
 
 async function injectAssist(tabId: number): Promise<void> {
   await saveState({ assistOpen: true });
@@ -302,7 +323,7 @@ async function addSite(topicId: string, rawHost: string): Promise<Array<{ host: 
       throw new ApiError(
         400,
         "permission_denied",
-        "Host permission was not granted. Use Add this site in the popup so Chrome can show the permission prompt.",
+        "Host permission was not granted. Use Add site on a topic in the side panel so Chrome can show the permission prompt.",
       );
     }
   }
@@ -329,9 +350,9 @@ async function removeSite(topicId: string, rawHost: string): Promise<Array<{ hos
 
 async function resolveTopicForHotkey(): Promise<{ id: string; title: string } | null> {
   const topics = await api<{ topics: TopicSummary[] }>("GET", "/topics");
-  const eligible = topics.topics.filter((t) => t.has_policy);
+  const eligible = topics.topics;
   if (eligible.length === 0) {
-    notify("Create a topic and accept a capture policy first (open the side panel).");
+    notify("Create a topic first (open the side panel).");
     return null;
   }
   const active = await getActiveTopicId();
@@ -341,7 +362,7 @@ async function resolveTopicForHotkey(): Promise<{ id: string; title: string } | 
     await setActiveTopicId(eligible[0]!.id);
     return eligible[0]!;
   }
-  notify("Pick a topic in the Dossier popup first, then use the hotkey.");
+  notify("Open a topic in the side panel first, then use the hotkey.");
   return null;
 }
 
@@ -391,6 +412,11 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   void (async () => {
     try {
+      if (msg?.type === "panel-visibility") {
+        if (typeof msg.windowId === "number") markPanel(msg.windowId, Boolean(msg.open));
+        sendResponse({ ok: true });
+        return;
+      }
       if (msg?.type === "health") {
         await ensureToken();
         const h = await api<{ ok: boolean; llm: boolean; db: boolean; paused: boolean }>("GET", "/health");
@@ -400,12 +426,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "set-token") {
         await chrome.storage.local.set({ token: msg.token });
         sendResponse({ ok: true });
-        return;
-      }
-      if (msg?.type === "pin") {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab) throw new Error("no tab");
-        sendResponse(await pinTab(tab));
         return;
       }
       if (msg?.type === "highlight") {
@@ -420,15 +440,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
       if (msg?.type === "assist") {
-        const data = await api("POST", msg.pin ? "/assist/pin" : "/assist", {
-          ...msg.thread,
-          pin: Boolean(msg.pin),
-        });
+        const data = await api("POST", "/assist", msg.thread);
         sendResponse(data);
-        return;
-      }
-      if (msg?.type === "keep") {
-        sendResponse(await api("POST", "/compositions", msg.payload));
         return;
       }
       if (msg?.type === "assist-open") {
@@ -455,6 +468,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "set-active-topic") {
         await setActiveTopicId(msg.topicId ?? null);
         sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === "current-host") {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const host = hostOfUrl(tab?.url);
+        const capturable = Boolean(
+          tab?.url && host && shouldCaptureUrl(tab.url, Boolean(tab.incognito)),
+        );
+        sendResponse({ host: capturable ? host : null, capturable });
         return;
       }
       if (msg?.type === "site-status") {

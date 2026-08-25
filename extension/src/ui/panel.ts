@@ -1,9 +1,9 @@
-import { normalizeHost, requestHostPermission } from "../sites";
+import { hostWatchedBy, normalizeHost, requestHostPermission } from "../sites";
 import { send } from "../runtime";
 
-type Topic = { id: string; title: string; intent: string; has_policy: boolean };
+type Topic = { id: string; title: string; hosts?: Array<{ host: string }> };
 type TopicHost = { id: string; host: string; added_at: string };
-type OutlineNode = { id: string; title: string; slug: string; kind: string };
+type Policy = { include: string[]; exclude: string[] };
 type Filing = {
   id: string;
   state: string;
@@ -11,27 +11,15 @@ type Filing = {
   url: string;
   readable_text: string | null;
   highlight_text: string | null;
-  rationale: string | null;
-  node_id: string | null;
-  score: number | null;
   captured_at?: string;
-  in_flight?: boolean;
-  job_kind?: string | null;
-  job_state?: string | null;
-  reviewable?: boolean;
 };
 
-const QUEUE_POLL_MS = 2000;
-
 let topic: Topic | null = null;
-let threadId: string | null = null;
-let proposalId: string | null = null;
-let structurePlan: Array<{ title: string; slug: string }> | null = null;
-let nodes: OutlineNode[] = [];
+let policy: Policy = { include: [], exclude: [] };
 let queue: Filing[] = [];
 let qIndex = 0;
-let tab = "chat";
-let queueTimer: number | null = null;
+let tab = "policy";
+let currentHost: string | null = null;
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await send<{ data?: T; error?: string; detail?: string }>({
@@ -50,7 +38,17 @@ function show(id: string, on: boolean): void {
   $(id).hidden = !on;
 }
 
+async function refreshCurrentHost(): Promise<void> {
+  const s = await send<{ host?: string | null }>({ type: "current-host" });
+  currentHost = s.host ?? null;
+  const hint = $("add-site-hint");
+  hint.textContent = currentHost
+    ? `Add ${currentHost} to a topic with Add site.`
+    : "This page can't be added as a site.";
+}
+
 async function loadTopics(): Promise<void> {
+  await refreshCurrentHost();
   const data = await call<{ topics: Topic[] }>("GET", "/topics");
   const ul = $("topic-list");
   ul.innerHTML = "";
@@ -59,6 +57,22 @@ async function loadTopics(): Promise<void> {
     li.className = "topic";
     const title = document.createElement("span");
     title.textContent = t.title;
+    const actions = document.createElement("span");
+    actions.className = "topic-actions";
+    const already = Boolean(currentHost && hostWatchedBy(currentHost, (t.hosts ?? []).map((h) => h.host)));
+    const add = document.createElement("button");
+    add.className = "primary";
+    add.textContent = already ? "Added" : "Add site";
+    add.disabled = !currentHost || already;
+    add.title = !currentHost
+      ? "This page can't be added"
+      : already
+        ? `${currentHost} is already on “${t.title}”`
+        : `Add ${currentHost} to “${t.title}”`;
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void addPageToTopic(t, add);
+    });
     const del = document.createElement("button");
     del.className = "danger";
     del.textContent = "Delete";
@@ -66,40 +80,116 @@ async function loadTopics(): Promise<void> {
       e.stopPropagation();
       void removeTopic(t);
     });
-    li.append(title, del);
+    actions.append(add, del);
+    li.append(title, actions);
     li.addEventListener("click", () => void openTopic(t.id));
     ul.appendChild(li);
   }
 }
 
+async function addPageToTopic(t: Topic, btn: HTMLButtonElement): Promise<void> {
+  if (!currentHost) return;
+  const host = currentHost;
+  const granted = await requestHostPermission(host);
+  if (!granted) {
+    alert("Host permission declined. The site was not added.");
+    return;
+  }
+  const r = await send<{ error?: string; detail?: string }>({
+    type: "add-site",
+    topicId: t.id,
+    host,
+  });
+  if (r.error) {
+    alert(r.detail || r.error);
+    return;
+  }
+  btn.textContent = "Added";
+  btn.disabled = true;
+}
+
 async function openTopic(id: string): Promise<void> {
   const data = await call<{
     topic: Topic;
-    policy: { yaml_text: string } | null;
-    nodes: OutlineNode[];
-    pending_proposal: { id: string; yaml_text: string; diff_text: string; accepted_at: string | null } | null;
+    policy: Policy;
     hosts: TopicHost[];
   }>("GET", `/topics/${id}`);
   topic = data.topic;
-  nodes = data.nodes;
+  policy = data.policy ?? { include: [], exclude: [] };
   $("topic-title").textContent = topic.title;
   show("topics-view", false);
   show("topic-view", true);
-  $("policy-yaml").textContent = data.policy?.yaml_text ?? "(no accepted policy)";
-  ($("policy-edit") as HTMLTextAreaElement).value = data.policy?.yaml_text ?? "";
-  if (data.pending_proposal && !data.pending_proposal.accepted_at) {
-    proposalId = data.pending_proposal.id;
-    $("proposal-diff").textContent = data.pending_proposal.diff_text;
-    show("proposal", true);
-  }
   await send({ type: "set-active-topic", topicId: topic.id });
+  renderPolicy();
   renderSites(data.hosts);
   await renderTab();
 }
 
+function renderPolicy(): void {
+  paintTerms("include-list", policy.include, (term) => void removeTerm("include", term));
+  paintTerms("exclude-list", policy.exclude, (term) => void removeTerm("exclude", term));
+}
+
+function paintTerms(elId: string, terms: string[], onRemove: (term: string) => void): void {
+  const ul = $(elId);
+  ul.innerHTML = "";
+  for (const term of terms) {
+    const li = document.createElement("li");
+    li.className = "chip";
+    const span = document.createElement("span");
+    span.textContent = term;
+    const rm = document.createElement("button");
+    rm.className = "danger";
+    rm.textContent = "×";
+    rm.title = `Remove ${term}`;
+    rm.addEventListener("click", () => onRemove(term));
+    li.append(span, rm);
+    ul.appendChild(li);
+  }
+}
+
+async function addTerm(kind: "include" | "exclude"): Promise<void> {
+  if (!topic) return;
+  const input = $(`${kind}-input`) as HTMLInputElement;
+  const term = input.value.trim();
+  if (!term) return;
+  const next = {
+    include: kind === "include" ? uniqueTerms([...policy.include, term]) : policy.include,
+    exclude: kind === "exclude" ? uniqueTerms([...policy.exclude, term]) : policy.exclude,
+  };
+  await savePolicy(next);
+  input.value = "";
+}
+
+async function removeTerm(kind: "include" | "exclude", term: string): Promise<void> {
+  const key = term.toLowerCase();
+  const next = {
+    include: kind === "include" ? policy.include.filter((t) => t.toLowerCase() !== key) : policy.include,
+    exclude: kind === "exclude" ? policy.exclude.filter((t) => t.toLowerCase() !== key) : policy.exclude,
+  };
+  await savePolicy(next);
+}
+
+async function savePolicy(next: Policy): Promise<void> {
+  if (!topic) return;
+  const data = await call<{ policy: Policy }>("PUT", `/topics/${topic.id}/policy`, next);
+  policy = data.policy;
+  renderPolicy();
+}
+
+function uniqueTerms(terms: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of terms) {
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 function renderSites(hosts: TopicHost[]): void {
-  show("sites-no-policy", !topic?.has_policy);
-  show("sites-ui", Boolean(topic?.has_policy));
   const ul = $("site-list");
   ul.innerHTML = "";
   for (const h of hosts) {
@@ -133,7 +223,6 @@ async function addSite(): Promise<void> {
     alert("not a valid hostname");
     return;
   }
-  // First await: permissions.request must run during the click/Enter gesture.
   const granted = await requestHostPermission(host);
   if (!granted) {
     alert("Host permission declined. The site was not added.");
@@ -169,85 +258,64 @@ function queuePath(): string {
 }
 
 async function renderTab(): Promise<void> {
-  for (const name of ["chat", "sites", "queue", "brief", "policy"]) {
+  for (const name of ["policy", "sites", "queue"]) {
     show(`tab-${name}`, tab === name);
     const btn = document.querySelector<HTMLButtonElement>(`#tabs [data-tab="${name}"]`);
-    if (btn) btn.classList.toggle("on", tab === name);
+    if (btn) {
+      btn.classList.toggle("on", tab === name);
+      btn.setAttribute("aria-selected", tab === name ? "true" : "false");
+    }
   }
   if (!topic) return;
   if (tab === "sites") await loadSites();
-  if (tab === "queue") {
-    startQueuePoll();
-    await loadQueue();
-  } else {
-    stopQueuePoll();
-  }
-  if (tab === "brief") {
-    const data = await call<{ markdown: string }>("GET", `/topics/${topic.id}/brief`);
-    $("brief").textContent = data.markdown;
-  }
+  if (tab === "queue") await loadQueue();
 }
 
 async function loadQueue(): Promise<void> {
   if (!topic) return;
   const keepId = queue[qIndex]?.id;
-  const data = await call<{ filings: Filing[]; nodes: OutlineNode[] }>("GET", queuePath());
-  nodes = data.nodes;
+  const data = await call<{ filings: Filing[] }>("GET", queuePath());
   queue = data.filings;
   const kept = keepId ? queue.findIndex((f) => f.id === keepId) : -1;
   qIndex = kept >= 0 ? kept : 0;
-  paintQueue("queue");
+  paintQueue();
 }
 
-function filingStatus(f: Filing): string {
-  if (f.in_flight && f.job_kind) {
-    if (f.job_state === "queued") return "queued";
-    if (f.job_kind === "embed") return "embedding";
-    if (f.job_kind === "judge") return "judging";
-    return f.job_kind;
-  }
-  return f.state;
-}
-
-function paintQueue(elId: string): void {
-  const ul = $(elId);
+function paintQueue(): void {
+  const ul = $("queue");
   ul.innerHTML = "";
   queue.forEach((f, i) => {
     const li = document.createElement("li");
     if (i === qIndex) li.classList.add("active");
-    if (f.in_flight) li.classList.add("in-flight");
-    const status = filingStatus(f);
-    const snip = (f.highlight_text || f.rationale || f.readable_text || "").slice(0, 240);
+    const snip = (f.highlight_text || f.readable_text || "").slice(0, 240);
     const when = f.captured_at ? escapeHtml(new Date(f.captured_at).toLocaleString()) : "";
     const link = f.url
       ? `<a href="${escapeHtml(f.url)}" target="_blank" rel="noreferrer">${escapeHtml(f.url)}</a>`
       : "";
+    const reject =
+      f.state !== "rejected"
+        ? `<button type="button" class="danger reject" data-id="${escapeHtml(f.id)}">Reject</button>`
+        : "";
     li.innerHTML = `<div class="queue-head">
         <strong>${escapeHtml(f.item_title)}</strong>
-        <span class="badge badge-${escapeHtml(status)}">${escapeHtml(status)}</span>
+        <span class="badge badge-${escapeHtml(f.state)}">${escapeHtml(f.state)}</span>
       </div>
       ${snip ? `<div class="snippet">${escapeHtml(snip)}</div>` : ""}
       ${link}
-      ${when ? `<div class="hint">${when}</div>` : ""}`;
-    li.addEventListener("click", () => {
+      ${when ? `<div class="hint">${when}</div>` : ""}
+      ${reject}`;
+    li.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest("button, a")) return;
       qIndex = i;
-      paintQueue(elId);
+      paintQueue();
+    });
+    li.querySelector(".reject")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      qIndex = i;
+      void verdict();
     });
     ul.appendChild(li);
   });
-}
-
-function startQueuePoll(): void {
-  stopQueuePoll();
-  queueTimer = window.setInterval(() => {
-    if (tab === "queue" && topic) void loadQueue().catch(() => undefined);
-  }, QUEUE_POLL_MS);
-}
-
-function stopQueuePoll(): void {
-  if (queueTimer == null) return;
-  clearInterval(queueTimer);
-  queueTimer = null;
 }
 
 function escapeHtml(s: string): string {
@@ -257,14 +325,14 @@ function escapeHtml(s: string): string {
 $("create").addEventListener("click", async () => {
   const title = ($("new-title") as HTMLInputElement).value.trim();
   if (!title) return;
-  const data = await call<{ topic: Topic; thread_id: string }>("POST", "/topics", { title });
-  threadId = data.thread_id;
+  const data = await call<{ topic: Topic }>("POST", "/topics", { title });
+  ($("new-title") as HTMLInputElement).value = "";
+  tab = "policy";
   await openTopic(data.topic.id);
 });
 
 $("back").addEventListener("click", () => {
   topic = null;
-  stopQueuePoll();
   show("topic-view", false);
   show("topics-view", true);
   void loadTopics();
@@ -279,10 +347,6 @@ async function removeTopic(t: Topic): Promise<void> {
   await call("DELETE", `/topics/${t.id}`);
   if (topic?.id === t.id) {
     topic = null;
-    threadId = null;
-    proposalId = null;
-    structurePlan = null;
-    stopQueuePoll();
     show("topic-view", false);
     show("topics-view", true);
   }
@@ -296,82 +360,13 @@ $("tabs").addEventListener("click", (e) => {
   void renderTab();
 });
 
-$("chat-send").addEventListener("click", async () => {
-  if (!topic) return;
-  const input = $("chat-input") as HTMLTextAreaElement;
-  const sendBtn = $("chat-send") as HTMLButtonElement;
-  const message = input.value.trim();
-  if (!message || sendBtn.disabled) return;
-  input.value = "";
-  const log = $("chat-log");
-  log.insertAdjacentHTML(
-    "beforeend",
-    `<div class="msg user"><strong>user</strong> ${escapeHtml(message)}</div>
-     <div class="msg assistant pending" id="chat-pending"><strong>assistant</strong> <span class="working">Working</span></div>`,
-  );
-  sendBtn.disabled = true;
-  input.disabled = true;
-  try {
-    const data = await call<{
-      thread_id: string;
-      messages: Array<{ role: string; content: string }>;
-      proposal?: { id: string; diff_text: string };
-      structure_plan?: Array<{ title: string; slug: string }>;
-    }>("POST", `/topics/${topic.id}/chat`, { message, thread_id: threadId });
-    threadId = data.thread_id;
-    log.innerHTML = data.messages
-      .map((m) => `<div class="msg ${m.role}"><strong>${m.role}</strong> ${escapeHtml(m.content)}</div>`)
-      .join("");
-    if (data.proposal) {
-      proposalId = data.proposal.id;
-      $("proposal-diff").textContent = data.proposal.diff_text;
-      show("proposal", true);
-    }
-    if (data.structure_plan?.length) {
-      structurePlan = data.structure_plan;
-      $("structure-plan").textContent = JSON.stringify(data.structure_plan, null, 2);
-      show("structure", true);
-    }
-  } catch (err) {
-    $("chat-pending")?.remove();
-    log.insertAdjacentHTML(
-      "beforeend",
-      `<div class="msg error">${escapeHtml((err as Error).message)}</div>`,
-    );
-  } finally {
-    sendBtn.disabled = false;
-    input.disabled = false;
-    input.focus();
-  }
+$("include-add").addEventListener("click", () => void addTerm("include"));
+$("exclude-add").addEventListener("click", () => void addTerm("exclude"));
+$("include-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void addTerm("include");
 });
-
-$("accept-policy").addEventListener("click", async () => {
-  if (!topic || !proposalId) return;
-  await call("POST", `/topics/${topic.id}/policy/accept`, { proposal_id: proposalId });
-  show("proposal", false);
-  await openTopic(topic.id);
-});
-
-$("apply-structure").addEventListener("click", async () => {
-  if (!topic || !structurePlan) return;
-  await call("POST", `/topics/${topic.id}/structure/apply`, { nodes: structurePlan });
-  show("structure", false);
-  await openTopic(topic.id);
-});
-
-$("propose-yaml").addEventListener("click", async () => {
-  if (!topic) return;
-  const yaml = ($("policy-edit") as HTMLTextAreaElement).value;
-  const data = await call<{ proposal: { id: string; diff_text: string } }>(
-    "POST",
-    `/topics/${topic.id}/policy/propose`,
-    { yaml_text: yaml },
-  );
-  proposalId = data.proposal.id;
-  $("proposal-diff").textContent = data.proposal.diff_text;
-  show("proposal", true);
-  tab = "chat";
-  void renderTab();
+$("exclude-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void addTerm("exclude");
 });
 
 $("show-rejected").addEventListener("change", () => {
@@ -383,64 +378,56 @@ $("add-host").addEventListener("keydown", (e) => {
   if (e.key === "Enter") void addSite();
 });
 
-$("export").addEventListener("click", async () => {
-  if (!topic) return;
-  const md = await call<string>("GET", `/topics/${topic.id}/export.md`);
-  const blob = new Blob([typeof md === "string" ? md : String(md)], { type: "text/markdown" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${topic.title.replace(/\s+/g, "-")}.md`;
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
 document.addEventListener("keydown", (e) => {
   if (tab !== "queue" || !topic) return;
   const t = e.target as HTMLElement;
   if (t.tagName === "TEXTAREA" || t.tagName === "INPUT") return;
   if (e.key === "j") {
     qIndex = Math.min(queue.length - 1, qIndex + 1);
-    paintQueue("queue");
+    paintQueue();
   } else if (e.key === "k") {
     qIndex = Math.max(0, qIndex - 1);
-    paintQueue("queue");
+    paintQueue();
   } else if (e.key === "x") {
-    void verdict("reject");
-  } else if (e.key === "Enter") {
-    void verdict("keep");
-  } else if (/^[1-9]$/.test(e.key)) {
-    const sections = nodes.filter((n) => n.kind === "section");
-    const node = sections[Number(e.key) - 1];
-    if (node) void verdict("refile", node.id);
+    void verdict();
   }
 });
 
-async function verdict(action: string, node_id?: string): Promise<void> {
+async function verdict(): Promise<void> {
   const f = queue[qIndex];
-  if (!f || !topic) return;
-  if (f.in_flight || f.reviewable === false) return;
-  await call("POST", `/filings/${f.id}/verdict`, { action, node_id });
+  if (!f || !topic || f.state === "rejected") return;
+  await call("POST", `/filings/${f.id}/verdict`, { action: "reject" });
   await loadQueue();
 }
 
 const HEALTH_POLL_MS = 2500;
 let connected = false;
 
+function setCaptureToggle(paused: boolean, enabled: boolean): void {
+  const input = $("capture-toggle") as HTMLInputElement;
+  input.checked = enabled && !paused;
+  input.disabled = !enabled;
+}
+
 async function syncHealth(): Promise<boolean> {
   try {
-    const h = await send<{ ok?: boolean; llm?: boolean; error?: string }>({ type: "health" });
+    const h = await send<{ ok?: boolean; llm?: boolean; paused?: boolean; error?: string }>({ type: "health" });
     if (h.error) {
       $("health").textContent = "service not running";
       $("health").className = "status bad";
+      $("token-box").hidden = h.error !== "no_token" && h.error !== "unauthorized";
+      setCaptureToggle(true, false);
       return false;
     }
     $("health").textContent = h.llm ? "healthy · llm" : "healthy";
     $("health").className = "status ok";
+    $("token-box").hidden = true;
+    setCaptureToggle(Boolean(h.paused), true);
     return true;
   } catch {
     $("health").textContent = "service not running";
     $("health").className = "status bad";
+    setCaptureToggle(true, false);
     return false;
   }
 }
@@ -454,11 +441,46 @@ async function onConnectionChange(ok: boolean): Promise<void> {
   }
 }
 
+$("capture-toggle").addEventListener("change", () => {
+  const on = ($("capture-toggle") as HTMLInputElement).checked;
+  void send({ type: on ? "resume" : "pause" }).then(() => syncHealth());
+});
+
+$("save-token").addEventListener("click", async () => {
+  const token = ($("token") as HTMLInputElement).value.trim();
+  if (!token) return;
+  await send({ type: "set-token", token });
+  connected = await syncHealth();
+  if (connected) await loadTopics().catch(() => undefined);
+});
+
+void chrome.windows.getCurrent().then((win) => {
+  if (win.id !== undefined) void send({ type: "panel-visibility", windowId: win.id, open: true });
+});
+window.addEventListener("pagehide", () => {
+  void chrome.windows.getCurrent().then((win) => {
+    if (win.id !== undefined) void send({ type: "panel-visibility", windowId: win.id, open: false });
+  });
+});
+
 void (async () => {
+  const seen = await chrome.storage.local.get(["seenFirstRun"]);
+  if (!seen.seenFirstRun) {
+    $("first-run").hidden = false;
+    await chrome.storage.local.set({ seenFirstRun: true });
+  }
   connected = await syncHealth();
   if (connected) await loadTopics().catch(() => undefined);
   window.setInterval(() => {
     void syncHealth().then(onConnectionChange);
+    if (connected && !topic) {
+      const prev = currentHost;
+      void refreshCurrentHost()
+        .then(() => {
+          if (prev !== currentHost) return loadTopics();
+        })
+        .catch(() => undefined);
+    }
   }, HEALTH_POLL_MS);
 })();
 

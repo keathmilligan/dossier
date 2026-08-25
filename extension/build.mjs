@@ -20,7 +20,6 @@ async function buildUi() {
       modulePreload: false,
       rollupOptions: {
         input: {
-          popup: resolve(root, "src/ui/popup.html"),
           panel: resolve(root, "src/ui/panel.html"),
           background: resolve(root, "src/background.ts"),
         },

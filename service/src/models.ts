@@ -1,24 +1,11 @@
-export type TopicStatus = "watching" | "active" | "drafting" | "shelved";
-export type NodeKind = "inbox" | "section";
-export type ItemSource = "watching" | "manual" | "pin";
-export type ItemOrigin = "public" | "private";
-export type FilingState = "inbox" | "proposed" | "filed" | "rejected" | "related";
-export const FILING_STATES: FilingState[] = ["inbox", "proposed", "filed", "rejected", "related"];
+export type ItemSource = "watching" | "manual";
+export type FilingState = "filed" | "rejected";
+export const FILING_STATES: FilingState[] = ["filed", "rejected"];
 export const QUEUE_LIMIT = 100;
-export type Verdict = "keep" | "demote" | "reject" | "reread";
-export type ExtractKind = "claim" | "quote" | "entity" | "note" | "architecture";
-export type JobKind = "embed" | "judge" | "extract";
-export type JobState = "queued" | "running" | "done" | "failed";
-export type ChatKind = "setup" | "policy" | "brief" | "reply";
-export type ChatRole = "user" | "assistant" | "system";
 
 export interface Topic {
   id: string;
   title: string;
-  intent: string;
-  status: TopicStatus;
-  venues_json: string;
-  auto_accept_confidence: number;
   created_at: string;
   updated_at: string;
 }
@@ -33,38 +20,9 @@ export interface TopicHost {
 export interface Policy {
   id: string;
   topic_id: string;
-  version: number;
-  yaml_text: string;
-  accepted_at: string;
-}
-
-export interface PolicyDocument {
-  topic: string;
-  intent: string;
   include: string[];
   exclude: string[];
-  rank: string[];
-  extract: string[];
-  voice: {
-    default: string;
-    hn?: string;
-    github?: string;
-    social?: string;
-    email?: string;
-  };
-  deploy: string[];
-  hosts: string[];
-  [key: string]: unknown;
-}
-
-export interface NodeRow {
-  id: string;
-  topic_id: string;
-  parent_id: string | null;
-  kind: NodeKind;
-  title: string;
-  slug: string;
-  position: number;
+  updated_at: string;
 }
 
 export interface Item {
@@ -78,33 +36,21 @@ export interface Item {
   source: ItemSource;
   readable_text: string | null;
   highlight_text: string | null;
-  origin: ItemOrigin;
 }
 
 export interface Filing {
   id: string;
   item_id: string;
   topic_id: string;
-  node_id: string | null;
   state: FilingState;
-  score: number | null;
-  rationale: string | null;
-  rank_in_node: number | null;
-  pinned: number;
-  verdict: Verdict | null;
 }
 
-export interface QueueFiling extends Omit<Filing, "state"> {
-  state: FilingState | "dropped" | "failed" | "queued" | "embedding" | "judging" | "extracting";
+export interface QueueFiling extends Filing {
   item_title: string;
   url: string;
   readable_text: string | null;
   highlight_text: string | null;
   captured_at: string;
-  in_flight: boolean;
-  job_kind: JobKind | null;
-  job_state: JobState | null;
-  reviewable: boolean;
 }
 
 export interface CaptureBody {
@@ -119,25 +65,6 @@ export interface CaptureBody {
   incognito?: boolean;
 }
 
-export interface JudgeResult {
-  include: boolean;
-  node_slug?: string | null;
-  score?: number;
-  rationale?: string;
-  extracts?: Array<{
-    kind: ExtractKind;
-    text: string;
-    attribution?: string;
-  }>;
-}
-
-export interface StructurePlanNode {
-  title: string;
-  slug: string;
-  parent_slug?: string | null;
-  position?: number;
-}
-
 export interface AssistRequest {
   url?: string;
   title?: string;
@@ -146,8 +73,6 @@ export interface AssistRequest {
   draft_box?: string;
   venue?: string;
   topic_id?: string | null;
-  pin?: boolean;
-  include_private?: boolean;
 }
 
 export interface AssistCite {

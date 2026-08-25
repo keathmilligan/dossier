@@ -53,7 +53,7 @@ function render(data: AssistResponse, denied: boolean): void {
         <h1>Dossier assist</h1>
         <button class="secondary" id="close">Close</button>
       </div>
-      ${denied ? `<p class="warn">Helping you reply. This thread will not be saved unless you Pin.</p>` : ""}
+      ${denied ? `<p class="warn">Helping you reply. This thread will not be saved.</p>` : ""}
       ${data.gap ? `<p class="gap">${escapeHtml(data.gap)}</p>` : ""}
       <h2>What I know</h2>
       <ul>${(data.what_i_know ?? []).map((x) => `<li>${escapeHtml(x)}</li>`).join("") || "<li>—</li>"}</ul>
@@ -65,8 +65,6 @@ function render(data: AssistResponse, denied: boolean): void {
       ${cite || "<p>—</p>"}
       <div>
         ${data.draft ? `<button id="copy">Copy draft</button>` : ""}
-        <button id="pin">Pin</button>
-        <button id="keep" class="secondary">Keep</button>
       </div>
     </div>
   `;
@@ -74,37 +72,18 @@ function render(data: AssistResponse, denied: boolean): void {
   shadow.getElementById("copy")?.addEventListener("click", () => {
     if (data.draft) void navigator.clipboard.writeText(data.draft);
   });
-  shadow.getElementById("pin")?.addEventListener("click", () => {
-    const thread = parseThread();
-    chrome.runtime.sendMessage({ type: "assist", pin: true, thread });
-  });
-  shadow.getElementById("keep")?.addEventListener("click", () => {
-    chrome.runtime.sendMessage({
-      type: "keep",
-      payload: {
-        topic_id: data.topic_id,
-        venue: parseThread().venue,
-        thread_url: location.href,
-        draft: data.draft ?? "",
-        talking_points: data.talking_points,
-        item_ids: data.item_ids,
-        gap: data.gap,
-      },
-    });
-  });
 }
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
-async function run(pin = false): Promise<void> {
+async function run(): Promise<void> {
   chrome.runtime.sendMessage({ type: "assist-open", open: true });
   const thread = parseThread();
   const denied = isDeniedUrl(thread.url);
   const resp = (await chrome.runtime.sendMessage({
     type: "assist",
-    pin,
     thread,
   })) as AssistResponse & { error?: string };
   if (resp?.error) {

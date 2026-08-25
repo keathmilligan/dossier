@@ -1,17 +1,15 @@
 import type { AppContext } from "./context.js";
-import type { CaptureBody, Item, ItemOrigin, Topic } from "./models.js";
+import type { CaptureBody, Item, Topic } from "./models.js";
 import { badRequest } from "./errors.js";
 import { checkDenylist } from "./denylist.js";
 import { hostOf, normalizeUrl } from "./normalize.js";
 import { newId, nowIso } from "./ids.js";
+import { matchesPolicy } from "./policy.js";
 import {
-  acceptedPolicy,
-  enqueueJob,
   ensureFiling,
   getItemByNormalized,
+  getPolicy,
   getTopic,
-  inboxNode,
-  listTopics,
   listUserDenylist,
   saveItem,
   topicsForHost,
@@ -39,8 +37,7 @@ export function ingestCapture(ctx: AppContext, body: CaptureBody): CaptureResult
   }
 
   const denylist = checkDenylist(body.url, listUserDenylist(ctx.db));
-  const isPin = body.source === "pin";
-  if (denylist.blocked && !isPin) {
+  if (denylist.blocked) {
     logDrop("denylisted", { pattern: denylist.reason });
     throw badRequest("denylisted", denylist.reason);
   }
@@ -50,20 +47,19 @@ export function ingestCapture(ctx: AppContext, body: CaptureBody): CaptureResult
   if (text.length > max) text = text.slice(0, max);
   const highlight = body.highlight_text?.trim() || null;
   const min = ctx.config.capture.min_body_chars;
-  if (!isPin && !highlight && text.trim().length < min) {
+  if (!highlight && text.trim().length < min) {
     logDrop("too_short", { chars: text.trim().length, min });
     throw badRequest("too_short", `readable text shorter than ${min} characters`);
   }
 
   const urlNormalized = normalizeUrl(body.url);
-  const topics = resolveTopics(ctx, body, urlNormalized);
+  const topics = resolveTopics(ctx, body, urlNormalized, `${body.title ?? ""} ${text}`);
   if (topics.length === 0) {
     logDrop("no_topic");
-    throw badRequest("no_topic", "no eligible topic for this capture");
+    return { item: null, filings: [], dropped: true };
   }
 
   const existing = getItemByNormalized(ctx.db, urlNormalized);
-  const origin: ItemOrigin = isPin && denylist.blocked ? "private" : "public";
   const item: Item = existing
     ? {
         ...existing,
@@ -83,31 +79,20 @@ export function ingestCapture(ctx: AppContext, body: CaptureBody): CaptureResult
         source: body.source,
         readable_text: text || null,
         highlight_text: highlight,
-        origin,
       };
 
   saveItem(ctx.db, item);
 
   const filings: Array<{ id: string; topic_id: string }> = [];
   for (const topic of topics) {
-    const inbox = inboxNode(ctx.db, topic.id);
-    const filing = ensureFiling(ctx.db, item.id, topic.id, inbox.id);
+    const filing = ensureFiling(ctx.db, item.id, topic.id);
     filings.push({ id: filing.id, topic_id: topic.id });
   }
-
-  enqueueJob(ctx.db, "embed", {
-    item_id: item.id,
-    source: body.source,
-    topic_ids: topics.map((t) => t.id),
-    title: item.title,
-    url: item.url,
-  });
 
   log("capture_ingested", {
     item_id: item.id,
     title: item.title,
     topics: topics.map((t) => t.title),
-    origin,
   });
 
   return { item, filings, dropped: false };
@@ -120,21 +105,19 @@ function mergeHighlight(prev: string | null, next: string | null): string | null
   return `${prev}\n${next}`;
 }
 
-function resolveTopics(ctx: AppContext, body: CaptureBody, urlNormalized: string): Topic[] {
-  if (body.topic_ids?.length) {
-    return body.topic_ids
-      .map((id) => getTopic(ctx.db, id))
-      .filter((t): t is Topic => Boolean(t));
-  }
-  if (body.source === "watching") {
-    return watchingTopicsForUrl(ctx, urlNormalized);
-  }
-  return listTopics(ctx.db).filter((t) => acceptedPolicy(ctx.db, t.id));
+function resolveTopics(ctx: AppContext, body: CaptureBody, urlNormalized: string, hay: string): Topic[] {
+  const candidates = body.topic_ids?.length
+    ? body.topic_ids.map((id) => getTopic(ctx.db, id)).filter((t): t is Topic => Boolean(t))
+    : watchingTopicsForUrl(ctx, urlNormalized);
+  return candidates.filter((topic) => {
+    const policy = getPolicy(ctx.db, topic.id);
+    if (!policy) return false;
+    return matchesPolicy(body.title ?? "", hay, policy.include, policy.exclude);
+  });
 }
 
-/** Topics whose site list covers this URL's host and which have an accepted policy. */
 export function watchingTopicsForUrl(ctx: AppContext, url: string): Topic[] {
   const host = hostOf(url);
   if (!host) return [];
-  return topicsForHost(ctx.db, host).filter((t) => acceptedPolicy(ctx.db, t.id));
+  return topicsForHost(ctx.db, host);
 }

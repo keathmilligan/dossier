@@ -1,17 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { api, authHeaders, drain, makeApp, makeCtx, mockLlm, SAMPLE_POLICY, TOKEN } from "./harness.js";
-import { createTopic } from "../src/topics.js";
-import { createProposal } from "../src/chat.js";
-import {
-  acceptPolicy,
-  addTopicHost,
-  applyStructure,
-  applyVerdict,
-  removeTopicHost,
-} from "../src/topics.js";
+import { api, authHeaders, makeApp, makeCtx, mockLlm, TOKEN } from "./harness.js";
+import { addTopicHost, applyVerdict, createTopic, putPolicy, removeTopicHost } from "../src/topics.js";
 import { ingestCapture } from "../src/capture.js";
-import { countItems, enqueueJob, getTopic, inboxNode, listNodes, listTopicHosts } from "../src/store.js";
-import { encodeVec, hashEmbed } from "../src/embeddings.js";
+import { countItems, getTopic, listTopicHosts } from "../src/store.js";
 import { newId } from "../src/ids.js";
 import { QUEUE_LIMIT } from "../src/models.js";
 
@@ -51,7 +42,7 @@ describe("capture_auth", () => {
 describe("capture_incognito", () => {
   it("rejects incognito", async () => {
     const { app, ctx } = makeApp();
-    await seedTopic(ctx);
+    seedReady(ctx);
     const res = await api(app, "POST", "/capture", {
       body: {
         url: "https://example.com/a",
@@ -65,114 +56,94 @@ describe("capture_incognito", () => {
   });
 });
 
-describe("manual_keeps / watching_drops", () => {
-  it("keeps manual items below filter threshold and drops watching ones", async () => {
-    const includeVec = [1, 0, 0, 0];
-    const pageVec = [0, 1, 0, 0];
-    const llm = mockLlm({
-      embed: (text) =>
-        /manifest v3|localhost bridge/i.test(text) ? includeVec : pageVec,
-      chat: () => ({
-        content: JSON.stringify({
-          include: true,
-          node_slug: null,
-          score: 0.3,
-          rationale: "weak",
-          extracts: [],
-        }),
-      }),
-    });
-    const ctx = makeCtx(llm);
-    const { topic } = await seedAccepted(ctx);
-    addTopicHost(ctx, topic.id, "example.com");
+describe("capture_match", () => {
+  it("files a watched page that hits include and drops one that does not", () => {
+    const ctx = makeCtx();
+    const { topic } = seedReady(ctx);
 
     ingestCapture(ctx, {
-      url: "https://example.com/manual-page",
-      title: "cooking",
-      source: "manual",
-      topic_ids: [topic.id],
-      readable_text: "totally unrelated page body about cooking ".repeat(10),
+      url: "https://example.com/mv3",
+      title: "Manifest V3 capture notes",
+      source: "watching",
+      readable_text: "implementation notes on Manifest V3 capture ".repeat(10),
     });
-    await drain(ctx);
     expect(countItems(ctx.db)).toBe(1);
-    const manualFiling = ctx.db.prepare("SELECT * FROM filings").get() as { state: string };
-    expect(manualFiling).toBeTruthy();
+    const kept = ctx.db.prepare("SELECT state FROM filings").get() as { state: string };
+    expect(kept.state).toBe("filed");
 
     ctx.db.prepare("DELETE FROM filings").run();
     ctx.db.prepare("DELETE FROM items").run();
     ctx.db.prepare("DELETE FROM items_fts").run();
-    ctx.db.prepare("DELETE FROM jobs").run();
 
-    ingestCapture(ctx, {
-      url: "https://example.com/watch-page",
+    const miss = ingestCapture(ctx, {
+      url: "https://example.com/cooking",
       title: "cooking",
       source: "watching",
       readable_text: "totally unrelated page body about cooking ".repeat(10),
     });
-    await drain(ctx);
-    expect(countItems(ctx.db)).toBe(1);
-    const watchFiling = ctx.db.prepare("SELECT * FROM filings").get() as { state: string; rationale: string };
-    expect(watchFiling.state).toBe("rejected");
-    expect(watchFiling.rationale).toBe("filtered");
+    expect(miss.dropped).toBe(true);
+    expect(countItems(ctx.db)).toBe(0);
+
+    putPolicy(ctx, topic.id, [], []);
+    const empty = ingestCapture(ctx, {
+      url: "https://example.com/mv3-again",
+      title: "Manifest V3 capture notes",
+      source: "watching",
+      readable_text: "implementation notes on Manifest V3 capture ".repeat(10),
+    });
+    expect(empty.dropped).toBe(true);
+  });
+
+  it("drops a page that hits an exclude term", () => {
+    const ctx = makeCtx();
+    seedReady(ctx, { include: ["Manifest V3"], exclude: ["Recall"] });
+    const miss = ingestCapture(ctx, {
+      url: "https://example.com/recall",
+      title: "Manifest V3 and Microsoft Recall",
+      source: "watching",
+      readable_text: "Manifest V3 capture compared to Microsoft Recall ".repeat(8),
+    });
+    expect(miss.dropped).toBe(true);
+    expect(countItems(ctx.db)).toBe(0);
   });
 });
 
 describe("topic_hosts", () => {
-  it("seeds sites from the first accepted policy, requires a policy to add, and lets you add/remove independently of later re-accepts", async () => {
+  it("lets you add and remove sites without a filled-in policy", () => {
     const ctx = makeCtx();
     const { topic } = createTopic(ctx, "Local capture");
-
-    expect(() => addTopicHost(ctx, topic.id, "example.com")).toThrow(/policy/);
-
-    const proposal = createProposal(ctx, topic.id, null, SAMPLE_POLICY);
-    await acceptPolicy(ctx, topic.id, proposal.id);
-    const seeded = listTopicHosts(ctx.db, topic.id).map((h) => h.host);
-    expect(seeded).toEqual(expect.arrayContaining(["example.com", "news.ycombinator.com", "github.com"]));
-
     const afterAdd = addTopicHost(ctx, topic.id, "https://www.arxiv.org/list");
     expect(afterAdd.map((h) => h.host)).toContain("arxiv.org");
-
-    const afterRemove = removeTopicHost(ctx, topic.id, "example.com");
-    expect(afterRemove.map((h) => h.host)).not.toContain("example.com");
-
-    // Re-accepting a newer policy version must not silently re-add or change hosts.
-    const p2 = createProposal(ctx, topic.id, null, SAMPLE_POLICY.replace("local capture", "v2"));
-    await acceptPolicy(ctx, topic.id, p2.id);
-    const afterReaccept = listTopicHosts(ctx.db, topic.id).map((h) => h.host);
-    expect(afterReaccept).not.toContain("example.com");
-    expect(afterReaccept).toContain("arxiv.org");
+    const afterRemove = removeTopicHost(ctx, topic.id, "arxiv.org");
+    expect(afterRemove.map((h) => h.host)).not.toContain("arxiv.org");
   });
 });
 
-describe("accept_policy", () => {
-  it("does not run until accept; version bumps; embeds refresh", async () => {
-    const ctx = makeCtx();
-    const { topic } = createTopic(ctx, "Local capture");
-    const proposal = createProposal(ctx, topic.id, null, SAMPLE_POLICY);
-    expect(ctx.db.prepare("SELECT COUNT(*) AS n FROM policies").get() as { n: number }).toEqual({
-      n: 0,
+describe("policy_api", () => {
+  it("creates an empty policy and applies include/exclude immediately", async () => {
+    const { app, ctx } = makeApp();
+    const created = await api(app, "POST", "/topics", { body: { title: "Local capture" } });
+    expect(created.statusCode).toBe(200);
+    const topic = created.json().topic as { id: string };
+    expect(created.json().policy).toEqual(expect.objectContaining({ include: [], exclude: [] }));
+
+    const put = await api(app, "PUT", `/topics/${topic.id}/policy`, {
+      body: { include: ["  MV3  ", "MV3", "localhost"], exclude: ["Recall"] },
     });
-    const first = await acceptPolicy(ctx, topic.id, proposal.id);
-    expect(first.version).toBe(1);
-    const embeds = ctx.db.prepare("SELECT COUNT(*) AS n FROM embeddings").get() as { n: number };
-    expect(embeds.n).toBeGreaterThan(0);
-    const p2 = createProposal(ctx, topic.id, null, SAMPLE_POLICY.replace("local capture", "v2"));
-    const second = await acceptPolicy(ctx, topic.id, p2.id);
-    expect(second.version).toBe(2);
+    expect(put.statusCode).toBe(200);
+    expect(put.json().policy.include).toEqual(["MV3", "localhost"]);
+    expect(put.json().policy.exclude).toEqual(["Recall"]);
+
+    const got = await api(app, "GET", `/topics/${topic.id}`);
+    expect(got.json().policy.include).toEqual(["MV3", "localhost"]);
+    expect(listTopicHosts(ctx.db, topic.id)).toEqual([]);
   });
 });
 
 describe("hosts_api", () => {
-  it("rejects adding a site before a policy is accepted, then adds/lists/removes over HTTP", async () => {
+  it("adds/lists/removes over HTTP without requiring include terms", async () => {
     const { app, ctx } = makeApp();
     const { topic } = createTopic(ctx, "Local capture");
-
-    const denied = await api(app, "POST", `/topics/${topic.id}/hosts`, { body: { host: "example.com" } });
-    expect(denied.statusCode).toBe(400);
-    expect(denied.json().error).toBe("no_policy");
-
-    const proposal = createProposal(ctx, topic.id, null, SAMPLE_POLICY);
-    await acceptPolicy(ctx, topic.id, proposal.id);
 
     const added = await api(app, "POST", `/topics/${topic.id}/hosts`, {
       body: { host: "https://Example.org/path" },
@@ -182,6 +153,11 @@ describe("hosts_api", () => {
 
     const listed = await api(app, "GET", `/topics/${topic.id}/hosts`);
     expect(listed.json().hosts.length).toBeGreaterThan(0);
+
+    const listedTopics = await api(app, "GET", "/topics");
+    const topicRows = listedTopics.json().topics as Array<{ id: string; hosts: Array<{ host: string }> }>;
+    const row = topicRows.find((t) => t.id === topic.id);
+    expect(row?.hosts.map((h) => h.host)).toContain("example.org");
 
     const aggregate = await api(app, "GET", "/hosts");
     expect(aggregate.json().hosts).toContain("example.org");
@@ -193,21 +169,18 @@ describe("hosts_api", () => {
 });
 
 describe("queue_api", () => {
-  it("returns all states newest-first, caps at 100, and marks in-flight jobs", async () => {
+  it("returns filed items newest-first, hides rejected unless asked, and caps at 100", async () => {
     const { app, ctx } = makeApp();
-    const { topic } = await seedAccepted(ctx);
-    const inbox = inboxNode(ctx.db, topic.id);
+    const { topic } = seedReady(ctx);
 
-    const titles = ["oldest filed", "middle rejected", "newest inbox"];
-    const states = ["filed", "rejected", "inbox"] as const;
-    const ids: string[] = [];
+    const titles = ["oldest filed", "middle rejected", "newest filed"];
+    const states = ["filed", "rejected", "filed"] as const;
     for (let i = 0; i < titles.length; i++) {
       const itemId = newId();
-      ids.push(itemId);
       ctx.db
         .prepare(
-          `INSERT INTO items(id, url, url_normalized, title, captured_at, source, origin, readable_text)
-           VALUES (?, ?, ?, ?, ?, 'manual', 'public', ?)`,
+          `INSERT INTO items(id, url, url_normalized, title, captured_at, source, readable_text)
+           VALUES (?, ?, ?, ?, ?, 'manual', ?)`,
         )
         .run(
           itemId,
@@ -218,56 +191,22 @@ describe("queue_api", () => {
           "x".repeat(250),
         );
       ctx.db
-        .prepare(
-          `INSERT INTO filings(id, item_id, topic_id, node_id, state, pinned) VALUES (?, ?, ?, ?, ?, 0)`,
-        )
-        .run(newId(), itemId, topic.id, inbox.id, states[i]);
+        .prepare(`INSERT INTO filings(id, item_id, topic_id, state) VALUES (?, ?, ?, ?)`)
+        .run(newId(), itemId, topic.id, states[i]);
     }
-
-    enqueueJob(ctx.db, "embed", { item_id: ids[2], source: "manual", topic_ids: [topic.id] });
 
     const listed = await api(app, "GET", `/topics/${topic.id}/queue`);
     expect(listed.statusCode).toBe(200);
-    const filings = listed.json().filings as Array<{
-      item_title: string;
-      state: string;
-      in_flight: boolean;
-      job_kind: string | null;
-      job_state: string | null;
-    }>;
-    expect(filings.map((f) => f.item_title)).toEqual(["newest inbox", "oldest filed"]);
-    expect(filings.map((f) => f.state)).toEqual(["queued", "filed"]);
-    expect(filings[0]).toMatchObject({ in_flight: true, job_kind: "embed", job_state: "queued" });
-    expect(filings[1]!.in_flight).toBe(false);
+    const filings = listed.json().filings as Array<{ item_title: string; state: string }>;
+    expect(filings.map((f) => f.item_title)).toEqual(["newest filed", "oldest filed"]);
+    expect(filings.map((f) => f.state)).toEqual(["filed", "filed"]);
 
     const withRejected = await api(app, "GET", `/topics/${topic.id}/queue?include_rejected=1`);
     expect(withRejected.json().filings.map((f: { item_title: string }) => f.item_title)).toEqual([
-      "newest inbox",
+      "newest filed",
       "middle rejected",
       "oldest filed",
     ]);
-
-    const goneId = enqueueJob(ctx.db, "embed", {
-      item_id: "gone-item",
-      source: "watching",
-      topic_ids: [topic.id],
-      title: "Filtered arXiv page",
-      url: "https://arxiv.org/abs/dropped",
-    });
-    ctx.db.prepare("UPDATE jobs SET state = 'done' WHERE id = ?").run(goneId);
-    const hiddenDropped = await api(app, "GET", `/topics/${topic.id}/queue`);
-    expect(
-      (hiddenDropped.json().filings as Array<{ item_title: string }>).some((f) => f.item_title === "Filtered arXiv page"),
-    ).toBe(false);
-    const withDropped = await api(app, "GET", `/topics/${topic.id}/queue?include_rejected=1`);
-    const dropped = (withDropped.json().filings as Array<{ item_title: string; state: string; url: string }>).find(
-      (f) => f.item_title === "Filtered arXiv page",
-    );
-    expect(dropped).toMatchObject({
-      state: "dropped",
-      url: "https://arxiv.org/abs/dropped",
-    });
-    ctx.db.prepare("DELETE FROM jobs WHERE payload LIKE '%gone-item%'").run();
 
     const rejectedOnly = await api(app, "GET", `/topics/${topic.id}/queue?states=rejected`);
     expect(rejectedOnly.json().filings.map((f: { item_title: string }) => f.item_title)).toEqual([
@@ -278,8 +217,8 @@ describe("queue_api", () => {
       const itemId = newId();
       ctx.db
         .prepare(
-          `INSERT INTO items(id, url, url_normalized, title, captured_at, source, origin, readable_text)
-           VALUES (?, ?, ?, ?, ?, 'manual', 'public', 'body')`,
+          `INSERT INTO items(id, url, url_normalized, title, captured_at, source, readable_text)
+           VALUES (?, ?, ?, ?, ?, 'manual', 'body')`,
         )
         .run(
           itemId,
@@ -289,10 +228,8 @@ describe("queue_api", () => {
           new Date(Date.UTC(2026, 1, 1, 0, 0, i)).toISOString(),
         );
       ctx.db
-        .prepare(
-          `INSERT INTO filings(id, item_id, topic_id, node_id, state, pinned) VALUES (?, ?, ?, ?, 'inbox', 0)`,
-        )
-        .run(newId(), itemId, topic.id, inbox.id);
+        .prepare(`INSERT INTO filings(id, item_id, topic_id, state) VALUES (?, ?, ?, 'filed')`)
+        .run(newId(), itemId, topic.id);
     }
     const capped = await api(app, "GET", `/topics/${topic.id}/queue`);
     const cappedFilings = capped.json().filings as Array<{ item_title: string; captured_at: string }>;
@@ -302,147 +239,76 @@ describe("queue_api", () => {
       expect(cappedFilings[i - 1]!.captured_at >= cappedFilings[i]!.captured_at).toBe(true);
     }
   });
+
+  it("rejects a filing and hides it from the default list", async () => {
+    const { app, ctx } = makeApp();
+    const { topic } = seedReady(ctx);
+    ingestCapture(ctx, {
+      url: "https://example.com/keep-me",
+      title: "Manifest V3 capture",
+      source: "watching",
+      readable_text: "implementation note on Manifest V3 capture ".repeat(12),
+    });
+    const filing = ctx.db.prepare("SELECT id FROM filings").get() as { id: string };
+    const res = await api(app, "POST", `/filings/${filing.id}/verdict`, { body: { action: "reject" } });
+    expect(res.statusCode).toBe(200);
+    const listed = await api(app, "GET", `/topics/${topic.id}/queue`);
+    expect(listed.json().filings).toHaveLength(0);
+    expect(() => applyVerdict(ctx, filing.id, "keep")).toThrow(/invalid_action/);
+  });
 });
 
 describe("delete_topic", () => {
-  it("removes the topic, orphans, and policy embeds; keeps shared items", async () => {
+  it("removes the topic and orphans; keeps shared items", async () => {
     const { app, ctx } = makeApp();
-    const { topic } = await seedAccepted(ctx);
+    const { topic } = seedReady(ctx);
     const other = createTopic(ctx, "Other");
+    putPolicy(ctx, other.topic.id, ["Manifest V3"], []);
     ingestCapture(ctx, {
       url: "https://example.com/only-here",
-      title: "Only here",
+      title: "Only here Manifest V3",
       source: "manual",
       topic_ids: [topic.id],
-      readable_text: "x".repeat(250),
+      readable_text: "Manifest V3 capture ".repeat(20),
     });
     ingestCapture(ctx, {
       url: "https://example.com/shared",
-      title: "Shared",
+      title: "Shared Manifest V3",
       source: "manual",
       topic_ids: [topic.id, other.topic.id],
-      readable_text: "y".repeat(250),
+      readable_text: "Manifest V3 capture ".repeat(20),
     });
     const missing = await api(app, "DELETE", "/topics/does-not-exist");
     expect(missing.statusCode).toBe(404);
     const res = await api(app, "DELETE", `/topics/${topic.id}`);
     expect(res.statusCode).toBe(204);
     expect(ctx.db.prepare("SELECT * FROM topics WHERE id = ?").get(topic.id)).toBeUndefined();
-    expect(
-      ctx.db.prepare("SELECT COUNT(*) AS n FROM embeddings WHERE owner_type LIKE 'policy_%'").get() as {
-        n: number;
-      },
-    ).toEqual({ n: 0 });
-    expect(ctx.db.prepare("SELECT title FROM items").all()).toEqual([{ title: "Shared" }]);
+    expect(ctx.db.prepare("SELECT title FROM items").all()).toEqual([{ title: "Shared Manifest V3" }]);
     expect(getTopic(ctx.db, other.topic.id)?.title).toBe("Other");
   });
 });
 
-describe("structure_orphan", () => {
-  it("dumps filings to inbox when a node is deleted", async () => {
-    const ctx = makeCtx();
-    const { topic } = await seedAccepted(ctx);
-    applyStructure(ctx, topic.id, [
-      { title: "Capture", slug: "capture", position: 1 },
-      { title: "Privacy", slug: "privacy", position: 2 },
-    ]);
-    const nodes = listNodes(ctx.db, topic.id);
-    const cap = nodes.find((n) => n.slug === "capture")!;
-    ingestCapture(ctx, {
-      url: "https://example.com/a",
-      title: "A",
-      source: "manual",
-      topic_ids: [topic.id],
-      readable_text: "x".repeat(250),
-    });
-    const filing = ctx.db.prepare("SELECT id FROM filings").get() as { id: string };
-    applyVerdict(ctx, filing.id, "keep", cap.id);
-    applyStructure(ctx, topic.id, [{ title: "Privacy", slug: "privacy", position: 1 }]);
-    const after = ctx.db.prepare("SELECT state, node_id FROM filings").get() as {
-      state: string;
-      node_id: string;
-    };
-    const inbox = inboxNode(ctx.db, topic.id);
-    expect(after.node_id).toBe(inbox.id);
-    expect(after.state).toBe("inbox");
-  });
-});
-
-describe("brief_omits_rejected / export_roundtrip", () => {
-  it("omits rejected items and export contains title, section, url", async () => {
-    const { app, ctx } = makeApp();
-    const { topic } = await seedAccepted(ctx);
-    applyStructure(ctx, topic.id, [{ title: "Capture models", slug: "capture-models", position: 1 }]);
-    const cap = listNodes(ctx.db, topic.id).find((n) => n.slug === "capture-models")!;
-    ingestCapture(ctx, {
-      url: "https://example.com/keep-me",
-      title: "Keep this",
-      source: "manual",
-      topic_ids: [topic.id],
-      readable_text: "implementation note on MV3 capture ".repeat(20),
-    });
-    ingestCapture(ctx, {
-      url: "https://example.com/drop-me",
-      title: "Drop this",
-      source: "manual",
-      topic_ids: [topic.id],
-      readable_text: "noise ".repeat(40),
-    });
-    const filings = ctx.db.prepare("SELECT id, item_id FROM filings ORDER BY id").all() as Array<{
-      id: string;
-      item_id: string;
-    }>;
-    applyVerdict(ctx, filings[0]!.id, "keep", cap.id);
-    applyVerdict(ctx, filings[1]!.id, "reject");
-
-    const brief = await api(app, "GET", `/topics/${topic.id}/brief`);
-    const md = brief.json().markdown as string;
-    expect(md).toContain("Keep this");
-    expect(md).not.toContain("Drop this");
-
-    const exp = await api(app, "GET", `/topics/${topic.id}/export.md`);
-    expect(exp.statusCode).toBe(200);
-    expect(exp.body).toContain("title:");
-    expect(exp.body).toContain("Capture models");
-    expect(exp.body).toContain("https://example.com/keep-me");
-  });
-});
-
 describe("assist", () => {
-  it("does not write unless pin; pin writes; private items do not leak; ungrounded ids force gap", async () => {
+  it("does not write and forces a gap when the draft cites unknown ids", async () => {
     const llm = mockLlm({
-      embed: () => [1, 0, 0, 0],
-      chat: (req) => {
-        if (req.system.includes("grounded remark")) {
-          return {
-            content: JSON.stringify({
-              mode: "grounded",
-              what_i_know: ["a"],
-              talking_points: ["b"],
-              draft: "a comment",
-              cite: { item_id: "not-retrieved", url: "https://fake.example", quote: "nope" },
-              gap: null,
-              item_ids: ["not-retrieved"],
-            }),
-          };
-        }
-        return {
-          content: JSON.stringify({
-            include: true,
-            node_slug: null,
-            score: 0.5,
-            rationale: "ok",
-            extracts: [{ kind: "quote", text: "MV3 capture works locally", attribution: "§1" }],
-          }),
-        };
-      },
+      chat: () => ({
+        content: JSON.stringify({
+          mode: "grounded",
+          what_i_know: ["a"],
+          talking_points: ["b"],
+          draft: "a comment",
+          cite: { item_id: "not-retrieved", url: "https://fake.example", quote: "nope" },
+          gap: null,
+          item_ids: ["not-retrieved"],
+        }),
+      }),
     });
     const { app, ctx } = makeApp(makeCtx(llm));
-    const { topic } = await seedAccepted(ctx);
+    const { topic } = seedReady(ctx);
 
     for (const [url, title] of [
-      ["https://example.com/one", "One"],
-      ["https://example.com/two", "Two"],
+      ["https://example.com/one", "One Manifest V3"],
+      ["https://example.com/two", "Two Manifest V3"],
     ] as const) {
       ingestCapture(ctx, {
         url,
@@ -452,16 +318,7 @@ describe("assist", () => {
         readable_text: "Manifest V3 capture and localhost bridge security notes. ".repeat(8),
       });
     }
-    await drain(ctx);
-    const items = ctx.db.prepare("SELECT id FROM items").all() as Array<{ id: string }>;
-    expect(items.length).toBe(2);
-    for (const it of items) {
-      applyVerdict(
-        ctx,
-        (ctx.db.prepare("SELECT id FROM filings WHERE item_id = ?").get(it.id) as { id: string }).id,
-        "keep",
-      );
-    }
+    expect(countItems(ctx.db)).toBe(2);
 
     const before = countItems(ctx.db);
     const assist = await api(app, "POST", "/assist", {
@@ -477,61 +334,17 @@ describe("assist", () => {
     expect(countItems(ctx.db)).toBe(before);
     expect(assist.json().mode).toBe("gap");
 
-    const pin = await api(app, "POST", "/assist/pin", {
-      body: {
-        url: "https://news.ycombinator.com/item?id=1",
-        title: "Ask HN",
-        thread_text: "Pin this objection about capture.",
-        selection: "Pin this objection about capture.",
-        venue: "hn",
-        topic_id: topic.id,
-      },
-    });
-    expect(pin.statusCode).toBe(200);
-    expect(countItems(ctx.db)).toBe(before + 1);
-
-    const privateItem = newId();
-    ctx.db
-      .prepare(
-        `INSERT INTO items(id, url, url_normalized, title, captured_at, source, origin, readable_text)
-         VALUES (?, 'https://mail.google.com/x', 'https://mail.google.com/x', 'Secret mail', datetime('now'), 'pin', 'private', ?)`,
-      )
-      .run(privateItem, "private mail about capture ".repeat(10));
-    const inbox = inboxNode(ctx.db, topic.id);
-    ctx.db
-      .prepare(
-        `INSERT INTO filings(id, item_id, topic_id, node_id, state, pinned) VALUES (?, ?, ?, ?, 'filed', 0)`,
-      )
-      .run(newId(), privateItem, topic.id, inbox.id);
-    ctx.db
-      .prepare(
-        `INSERT INTO embeddings(id, owner_type, owner_id, model, dim, vec) VALUES (?, 'item', ?, ?, 8, ?)`,
-      )
-      .run(newId(), privateItem, ctx.config.llm.embed_model, encodeVec(hashEmbed("secret mail")));
-
-    const leak = await api(app, "POST", "/assist", {
-      body: {
-        url: "https://news.ycombinator.com/item?id=2",
-        thread_text: "secret mail about capture",
-        venue: "hn",
-        topic_id: topic.id,
-        include_private: false,
-      },
-    });
-    const ids = (leak.json().item_ids as string[]) ?? [];
-    expect(ids).not.toContain(privateItem);
+    const pinGone = await api(app, "POST", "/assist/pin", { body: { topic_id: topic.id } });
+    expect(pinGone.statusCode).toBe(404);
   });
 });
 
-async function seedTopic(ctx: ReturnType<typeof makeCtx>) {
-  return createTopic(ctx, "Local capture");
-}
-
-async function seedAccepted(ctx: ReturnType<typeof makeCtx>) {
+function seedReady(
+  ctx: ReturnType<typeof makeCtx>,
+  opts: { include?: string[]; exclude?: string[] } = {},
+) {
   const { topic } = createTopic(ctx, "Local capture");
-  const proposal = createProposal(ctx, topic.id, null, SAMPLE_POLICY);
-  await acceptPolicy(ctx, topic.id, proposal.id);
+  putPolicy(ctx, topic.id, opts.include ?? ["Manifest V3 capture", "localhost bridge"], opts.exclude ?? []);
+  addTopicHost(ctx, topic.id, "example.com");
   return { topic };
 }
-
-

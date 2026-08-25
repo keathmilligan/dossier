@@ -9,7 +9,6 @@ function client(fetchImpl: typeof fetch): OllamaClient {
   return new OllamaClient({
     baseUrl: "http://127.0.0.1:11434/v1",
     chatModel: "llama3.2",
-    embedModel: "nomic-embed-text",
     timeoutMs: 5000,
     fetchImpl,
   });
@@ -42,15 +41,4 @@ describe("ollama_log", () => {
     expect(lines(spy).some((l) => l.startsWith("llm chat error") && l.includes("status=500"))).toBe(true);
   });
 
-  it("logs embed calls", async () => {
-    const spy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const llm = client(async () =>
-      new Response(JSON.stringify({ data: [{ embedding: [1, 0] }] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    await llm.embed("page about capture");
-    expect(lines(spy).some((l) => l.startsWith("llm embed ok") && l.includes("dim=2"))).toBe(true);
-  });
 });

@@ -1,16 +1,8 @@
 #!/usr/bin/env node
-import {
-  bindHost,
-  ensureDataDir,
-  loadOrCreateConfig,
-  loadOrCreateToken,
-  migrateLegacyConfig,
-  pathsFor,
-} from "./config.js";
+import { bindHost, ensureDataDir, loadOrCreateConfig, loadOrCreateToken, pathsFor } from "./config.js";
 import { openDb, getMeta, setMeta } from "./db.js";
 import { OllamaClient } from "./ollama.js";
 import { buildApp } from "./app.js";
-import { processQueue, requeueFilteredFilings } from "./jobs.js";
 import { createLogger } from "./logger.js";
 import type { AppContext } from "./context.js";
 
@@ -18,7 +10,6 @@ async function main(): Promise<void> {
   const paths = pathsFor();
   ensureDataDir(paths.dataDir);
   ensureDataDir(paths.configDir);
-  migrateLegacyConfig(paths);
   const config = loadOrCreateConfig(paths.configPath);
   const token = loadOrCreateToken(paths.tokenPath);
   const db = openDb(paths.dbPath);
@@ -26,7 +17,6 @@ async function main(): Promise<void> {
   const llm = new OllamaClient({
     baseUrl: config.llm.base_url,
     chatModel: config.llm.chat_model,
-    embedModel: config.llm.embed_model,
     timeoutMs: config.llm.timeout_s * 1000,
   });
   const paused = { value: getMeta(db, "paused") === "1" };
@@ -35,12 +25,7 @@ async function main(): Promise<void> {
   const host = bindHost(config.listen);
   const port = config.port;
 
-  const tick = setInterval(() => {
-    void processQueue(ctx).catch(() => undefined);
-  }, 1500);
-
   const close = async () => {
-    clearInterval(tick);
     setMeta(db, "paused", ctx.paused.value ? "1" : "0");
     logger.info("service_stopped");
     await app.close();
@@ -50,7 +35,6 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void close());
   process.on("SIGTERM", () => void close());
 
-  requeueFilteredFilings(ctx);
   await app.listen({ host, port });
   logger.info("service_started", {
     url: `http://${host}:${port}`,

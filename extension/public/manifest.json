@@ -25,7 +25,6 @@
     }
   },
   "action": {
-    "default_popup": "src/ui/popup.html",
     "default_title": "Dossier",
     "default_icon": {
       "16": "icons/icon16.png",

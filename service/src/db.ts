@@ -1,7 +1,8 @@
+import { existsSync, unlinkSync } from "node:fs";
 import Database from "better-sqlite3";
 import type { Database as Db } from "better-sqlite3";
 
-export const SCHEMA_VERSION = "1";
+export const SCHEMA_VERSION = "2";
 
 const SCHEMA = `
 PRAGMA foreign_keys=ON;
@@ -13,45 +14,18 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS topics (
-  id                      TEXT PRIMARY KEY,
-  title                   TEXT NOT NULL,
-  intent                  TEXT NOT NULL DEFAULT '',
-  status                  TEXT NOT NULL DEFAULT 'watching'
-                            CHECK (status IN ('watching','active','drafting','shelved')),
-  venues_json             TEXT NOT NULL DEFAULT '[]',
-  auto_accept_confidence  REAL NOT NULL DEFAULT 0.85,
-  created_at              TEXT NOT NULL,
-  updated_at              TEXT NOT NULL
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS policies (
-  id           TEXT PRIMARY KEY,
-  topic_id     TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  version      INTEGER NOT NULL,
-  yaml_text    TEXT NOT NULL,
-  accepted_at  TEXT NOT NULL,
-  UNIQUE (topic_id, version)
-);
-
-CREATE TABLE IF NOT EXISTS policy_proposals (
-  id           TEXT PRIMARY KEY,
-  topic_id     TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  yaml_text    TEXT NOT NULL,
-  diff_text    TEXT NOT NULL,
-  thread_id    TEXT,
-  created_at   TEXT NOT NULL,
-  accepted_at  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS nodes (
-  id         TEXT PRIMARY KEY,
-  topic_id   TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  parent_id  TEXT REFERENCES nodes(id) ON DELETE SET NULL,
-  kind       TEXT NOT NULL CHECK (kind IN ('inbox','section')),
-  title      TEXT NOT NULL,
-  slug       TEXT NOT NULL,
-  position   INTEGER NOT NULL,
-  UNIQUE (topic_id, slug)
+  id            TEXT PRIMARY KEY,
+  topic_id      TEXT NOT NULL UNIQUE REFERENCES topics(id) ON DELETE CASCADE,
+  include_json  TEXT NOT NULL DEFAULT '[]',
+  exclude_json  TEXT NOT NULL DEFAULT '[]',
+  updated_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS topic_hosts (
@@ -70,46 +44,19 @@ CREATE TABLE IF NOT EXISTS items (
   referrer        TEXT,
   captured_at     TEXT NOT NULL,
   dwell_ms        INTEGER NOT NULL DEFAULT 0,
-  source          TEXT NOT NULL CHECK (source IN ('watching','manual','pin')),
+  source          TEXT NOT NULL CHECK (source IN ('watching','manual')),
   readable_text   TEXT,
-  highlight_text  TEXT,
-  origin          TEXT NOT NULL DEFAULT 'public'
-                    CHECK (origin IN ('public','private'))
+  highlight_text  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS items_url_norm ON items(url_normalized);
 
 CREATE TABLE IF NOT EXISTS filings (
-  id           TEXT PRIMARY KEY,
-  item_id      TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-  topic_id     TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  node_id      TEXT REFERENCES nodes(id) ON DELETE SET NULL,
-  state        TEXT NOT NULL
-                 CHECK (state IN ('inbox','proposed','filed','rejected','related')),
-  score        REAL,
-  rationale    TEXT,
-  rank_in_node REAL,
-  pinned       INTEGER NOT NULL DEFAULT 0,
-  verdict      TEXT CHECK (verdict IN ('keep','demote','reject','reread')),
+  id        TEXT PRIMARY KEY,
+  item_id   TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  topic_id  TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  state     TEXT NOT NULL CHECK (state IN ('filed','rejected')),
   UNIQUE (item_id, topic_id)
-);
-
-CREATE TABLE IF NOT EXISTS extracts (
-  id          TEXT PRIMARY KEY,
-  item_id     TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('claim','quote','entity','note','architecture')),
-  text        TEXT NOT NULL,
-  attribution TEXT
-);
-
-CREATE TABLE IF NOT EXISTS embeddings (
-  id          TEXT PRIMARY KEY,
-  owner_type  TEXT NOT NULL CHECK (owner_type IN ('item','policy_include','policy_exclude')),
-  owner_id    TEXT NOT NULL,
-  model       TEXT NOT NULL,
-  dim         INTEGER NOT NULL,
-  vec         BLOB NOT NULL,
-  UNIQUE (owner_type, owner_id, model)
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
@@ -120,52 +67,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
   tokenize='porter'
 );
 
-CREATE TABLE IF NOT EXISTS chat_threads (
-  id         TEXT PRIMARY KEY,
-  topic_id   TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  kind       TEXT NOT NULL CHECK (kind IN ('setup','policy','brief','reply')),
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS chat_messages (
-  id          TEXT PRIMARY KEY,
-  thread_id   TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
-  role        TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
-  content     TEXT NOT NULL,
-  created_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS compositions (
-  id                  TEXT PRIMARY KEY,
-  topic_id            TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  venue               TEXT NOT NULL DEFAULT 'generic',
-  thread_url          TEXT,
-  draft               TEXT NOT NULL,
-  talking_points_json TEXT NOT NULL DEFAULT '[]',
-  item_ids_json       TEXT NOT NULL DEFAULT '[]',
-  gap                 TEXT,
-  kept_at             TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS denylist (
   id       TEXT PRIMARY KEY,
   pattern  TEXT NOT NULL UNIQUE,
   reason   TEXT
 );
-
-CREATE TABLE IF NOT EXISTS jobs (
-  id          TEXT PRIMARY KEY,
-  kind        TEXT NOT NULL CHECK (kind IN ('embed','judge','extract')),
-  payload     TEXT NOT NULL,
-  state       TEXT NOT NULL DEFAULT 'queued'
-                CHECK (state IN ('queued','running','done','failed')),
-  error       TEXT,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
-);
 `;
 
 export function openDb(dbPath: string): Db {
+  if (dbPath !== ":memory:" && existsSync(dbPath) && existingSchemaVersion(dbPath) !== SCHEMA_VERSION) {
+    discardDbFile(dbPath);
+  }
   const db = new Database(dbPath);
   db.pragma("foreign_keys = ON");
   db.pragma("journal_mode = WAL");
@@ -177,6 +89,32 @@ export function openDb(dbPath: string): Db {
     db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION);
   }
   return db;
+}
+
+function existingSchemaVersion(dbPath: string): string | null {
+  try {
+    const probe = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = probe.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
+        | { value: string }
+        | undefined;
+      return row?.value ?? null;
+    } finally {
+      probe.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+function discardDbFile(dbPath: string): void {
+  for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    try {
+      unlinkSync(p);
+    } catch {
+      /* missing */
+    }
+  }
 }
 
 export function getMeta(db: Db, key: string): string | null {

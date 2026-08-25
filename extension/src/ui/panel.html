@@ -8,11 +8,25 @@
   <body>
     <header>
       <h1>Dossier</h1>
+      <label class="switch" title="Pause or resume capture">
+        <input id="capture-toggle" type="checkbox" />
+        <span class="switch-ui"></span>
+        <span class="switch-label">Capture</span>
+      </label>
       <span id="health" class="status"></span>
     </header>
     <main>
+      <p id="first-run" class="warn" hidden>
+        Dossier stores pages you file on this machine. It does not send page text anywhere except the LLM you configured (default: Ollama on this computer).
+      </p>
+      <div id="token-box" hidden>
+        <p class="status">Native host unavailable. Paste the token from <code>~/.local/share/dossier/token</code>.</p>
+        <input id="token" type="text" autocomplete="off" />
+        <button id="save-token" class="primary">Save token</button>
+      </div>
       <section id="topics-view">
         <h2>Topics</h2>
+        <p id="add-site-hint" class="status hint"></p>
         <ul id="topic-list" class="list"></ul>
         <div class="row">
           <input id="new-title" type="text" placeholder="New topic title" />
@@ -25,57 +39,43 @@
           <strong id="topic-title"></strong>
           <button id="delete-topic" class="danger">Delete</button>
         </div>
-        <div class="tabs" id="tabs">
-          <button data-tab="chat" class="on">Chat</button>
-          <button data-tab="sites">Sites</button>
-          <button data-tab="queue">Filings</button>
-          <button data-tab="brief">Brief</button>
-          <button data-tab="policy">Policy</button>
+        <div class="tabs" id="tabs" role="tablist">
+          <button data-tab="policy" class="on" role="tab" aria-selected="true">Policy</button>
+          <button data-tab="sites" role="tab" aria-selected="false">Sites</button>
+          <button data-tab="queue" role="tab" aria-selected="false">Filings</button>
         </div>
-        <div id="tab-chat">
-          <div id="chat-log"></div>
-          <textarea id="chat-input" placeholder="Describe the topic and what should get in…"></textarea>
-          <button id="chat-send" class="primary">Send</button>
-          <div id="proposal" hidden>
-            <h2>Policy proposal</h2>
-            <pre id="proposal-diff" class="yaml"></pre>
-            <button id="accept-policy" class="primary">Accept policy</button>
+        <div id="tab-policy">
+          <p class="status">Pages on this topic’s sites are captured when they match include and miss exclude. Changes apply immediately.</p>
+          <div class="policy-block">
+            <h2>Include</h2>
+            <ul id="include-list" class="chip-list"></ul>
+            <div class="row">
+              <input id="include-input" type="text" placeholder="Add a term to include" />
+              <button id="include-add" class="primary">Add</button>
+            </div>
           </div>
-          <div id="structure" hidden>
-            <h2>Outline plan</h2>
-            <pre id="structure-plan"></pre>
-            <button id="apply-structure" class="primary">Apply structure</button>
+          <div class="policy-block">
+            <h2>Exclude</h2>
+            <ul id="exclude-list" class="chip-list"></ul>
+            <div class="row">
+              <input id="exclude-input" type="text" placeholder="Add a term to exclude" />
+              <button id="exclude-add" class="primary">Add</button>
+            </div>
           </div>
         </div>
         <div id="tab-sites" hidden>
-          <p id="sites-no-policy" class="status" hidden>Accept a capture policy first (Chat tab) — then you can add sites here, or use the toolbar popup / hotkey while browsing.</p>
-          <div id="sites-ui" hidden>
-            <p class="status">Sites captured for this topic. Add one you're not currently on, or remove any of them.</p>
-            <div class="row">
-              <input id="add-host" type="text" placeholder="example.com" />
-              <button id="add-host-btn" class="primary">Add site</button>
-            </div>
-            <ul id="site-list" class="list"></ul>
+          <p class="status">Sites captured for this topic. Add one you're not currently on, or remove any of them.</p>
+          <div class="row">
+            <input id="add-host" type="text" placeholder="example.com" />
+            <button id="add-host-btn" class="primary">Add site</button>
           </div>
+          <ul id="site-list" class="list"></ul>
         </div>
         <div id="tab-queue" hidden>
-          <p class="status">newest first · in-flight highlighted · j/k move · enter keep · x reject · 1–9 file to section</p>
+          <p class="status">newest first · x or Reject dismisses a capture</p>
           <label class="chk"><input id="show-rejected" type="checkbox" /> Show rejected</label>
           <ul id="queue" class="list"></ul>
         </div>
-        <div id="tab-brief" hidden>
-          <div class="row">
-            <button id="export">Export Markdown</button>
-          </div>
-          <pre id="brief" class="brief"></pre>
-        </div>
-        <div id="tab-policy" hidden>
-          <pre id="policy-yaml" class="yaml"></pre>
-          <p class="status">Edit via chat, or paste YAML below and propose.</p>
-          <textarea id="policy-edit"></textarea>
-          <button id="propose-yaml">Propose YAML</button>
-        </div>
-
       </section>
     </main>
     <script type="module" src="./panel.ts"></script>
