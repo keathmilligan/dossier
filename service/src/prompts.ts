@@ -1,3 +1,9 @@
+export const PROMPT_SCOPE = `Decide if a page belongs in the topic described by PROMPT.
+Treat the title as strong evidence. Related subtopics count as in scope.
+If the page is plausibly about the topic, in_scope is true.
+in_scope is false only when the page is clearly unrelated.
+Reply with JSON only: {"in_scope": true} or {"in_scope": false}. Do not explain.`;
+
 export const PROMPT_ASSIST = `You draft a short, grounded remark from the user's current (possibly thin) dossier.
 Return JSON only. No markdown fences.
 Schema:

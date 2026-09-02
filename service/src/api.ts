@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "./context.js";
 import { badRequest, notFound } from "./errors.js";
 import { ingestCapture } from "./capture.js";
+import { tickJudge } from "./judge.js";
 import { runAssist } from "./assist.js";
 import { addTopicHost, applyVerdict, createTopic, deleteTopic, patchTopic, putPolicy, removeTopicHost } from "./topics.js";
 import {
@@ -59,7 +60,7 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
     if (!topic) throw notFound("topic_not_found");
     return {
       topic,
-      policy: getPolicy(ctx.db, id) ?? { include: [], exclude: [] },
+      policy: getPolicy(ctx.db, id) ?? { prompt: "" },
       hosts: listTopicHosts(ctx.db, id),
     };
   });
@@ -74,7 +75,7 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.put("/topics/:id/policy", async (req) => {
     const { id } = req.params as { id: string };
     const body = asObj(req.body);
-    const policy = putPolicy(ctx, id, body.include, body.exclude);
+    const policy = putPolicy(ctx, id, body.prompt);
     return { policy };
   });
 
@@ -119,7 +120,9 @@ export function registerRoutes(app: FastifyInstance, ctx: AppContext): void {
       ctx.logger.info("capture_dropped", { url: body?.url, source: body?.source, reason: "paused" });
       throw badRequest("paused", "capture is paused");
     }
-    return ingestCapture(ctx, req.body as CaptureBody);
+    const result = ingestCapture(ctx, req.body as CaptureBody);
+    if (!result.dropped) void tickJudge(ctx);
+    return result;
   });
 
   app.post("/filings/:id/verdict", async (req) => {

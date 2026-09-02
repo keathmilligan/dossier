@@ -2,7 +2,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import Database from "better-sqlite3";
 import type { Database as Db } from "better-sqlite3";
 
-export const SCHEMA_VERSION = "2";
+export const SCHEMA_VERSION = "3";
 
 const SCHEMA = `
 PRAGMA foreign_keys=ON;
@@ -21,11 +21,10 @@ CREATE TABLE IF NOT EXISTS topics (
 );
 
 CREATE TABLE IF NOT EXISTS policies (
-  id            TEXT PRIMARY KEY,
-  topic_id      TEXT NOT NULL UNIQUE REFERENCES topics(id) ON DELETE CASCADE,
-  include_json  TEXT NOT NULL DEFAULT '[]',
-  exclude_json  TEXT NOT NULL DEFAULT '[]',
-  updated_at    TEXT NOT NULL
+  id         TEXT PRIMARY KEY,
+  topic_id   TEXT NOT NULL UNIQUE REFERENCES topics(id) ON DELETE CASCADE,
+  prompt     TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS topic_hosts (
@@ -55,7 +54,7 @@ CREATE TABLE IF NOT EXISTS filings (
   id        TEXT PRIMARY KEY,
   item_id   TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
   topic_id  TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  state     TEXT NOT NULL CHECK (state IN ('filed','rejected')),
+  state     TEXT NOT NULL CHECK (state IN ('queued','filed','rejected')),
   UNIQUE (item_id, topic_id)
 );
 
@@ -75,9 +74,25 @@ CREATE TABLE IF NOT EXISTS denylist (
 `;
 
 export function openDb(dbPath: string): Db {
-  if (dbPath !== ":memory:" && existsSync(dbPath) && existingSchemaVersion(dbPath) !== SCHEMA_VERSION) {
+  if (dbPath !== ":memory:" && existsSync(dbPath) && !fileMatchesSchema(dbPath)) {
     discardDbFile(dbPath);
   }
+  let db = connect(dbPath);
+  if (schemaReady(db)) return db;
+  db.close();
+  if (dbPath === ":memory:") throw new Error("in-memory schema mismatch");
+  discardDbFile(dbPath);
+  if (existsSync(dbPath)) {
+    throw new Error(
+      `Could not replace outdated database ${dbPath}. Stop dossierd and delete that file.`,
+    );
+  }
+  db = connect(dbPath);
+  if (!schemaReady(db)) throw new Error(`failed to create schema ${SCHEMA_VERSION}`);
+  return db;
+}
+
+function connect(dbPath: string): Db {
   const db = new Database(dbPath);
   db.pragma("foreign_keys = ON");
   db.pragma("journal_mode = WAL");
@@ -91,19 +106,29 @@ export function openDb(dbPath: string): Db {
   return db;
 }
 
-function existingSchemaVersion(dbPath: string): string | null {
+function schemaReady(db: Db): boolean {
+  const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
+    | { value: string }
+    | undefined;
+  if (version?.value !== SCHEMA_VERSION) return false;
+  const cols = db.prepare("PRAGMA table_info(policies)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "prompt")) return false;
+  const filing = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'filings'").get() as
+    | { sql: string }
+    | undefined;
+  return Boolean(filing?.sql.includes("queued"));
+}
+
+function fileMatchesSchema(dbPath: string): boolean {
   try {
     const probe = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
-      const row = probe.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
-        | { value: string }
-        | undefined;
-      return row?.value ?? null;
+      return schemaReady(probe);
     } finally {
       probe.close();
     }
   } catch {
-    return null;
+    return false;
   }
 }
 

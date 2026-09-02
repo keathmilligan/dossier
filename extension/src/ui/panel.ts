@@ -3,7 +3,7 @@ import { send } from "../runtime";
 
 type Topic = { id: string; title: string; hosts?: Array<{ host: string }> };
 type TopicHost = { id: string; host: string; added_at: string };
-type Policy = { include: string[]; exclude: string[] };
+type Policy = { prompt: string };
 type Filing = {
   id: string;
   state: string;
@@ -15,7 +15,7 @@ type Filing = {
 };
 
 let topic: Topic | null = null;
-let policy: Policy = { include: [], exclude: [] };
+let policy: Policy = { prompt: "" };
 let queue: Filing[] = [];
 let qIndex = 0;
 let tab = "policy";
@@ -82,7 +82,9 @@ async function loadTopics(): Promise<void> {
     });
     actions.append(add, del);
     li.append(title, actions);
-    li.addEventListener("click", () => void openTopic(t.id));
+    li.addEventListener("click", () => {
+      void openTopic(t.id).catch((err) => alert((err as Error).message));
+    });
     ul.appendChild(li);
   }
 }
@@ -108,85 +110,67 @@ async function addPageToTopic(t: Topic, btn: HTMLButtonElement): Promise<void> {
   btn.disabled = true;
 }
 
-async function openTopic(id: string): Promise<void> {
-  const data = await call<{
-    topic: Topic;
-    policy: Policy;
-    hosts: TopicHost[];
-  }>("GET", `/topics/${id}`);
-  topic = data.topic;
-  policy = data.policy ?? { include: [], exclude: [] };
+async function openTopic(
+  id: string,
+  seed?: { topic: Topic; policy?: Policy; hosts?: TopicHost[] },
+): Promise<void> {
+  const loaded = seed?.topic
+    ? { topic: seed.topic, policy: seed.policy, hosts: seed.hosts ?? [] }
+    : await call<{ topic: Topic; policy?: Policy; hosts?: TopicHost[] }>("GET", `/topics/${id}`);
+  if (!loaded.topic) throw new Error("topic_not_found");
+  topic = loaded.topic;
+  policy = loaded.policy ?? { prompt: "" };
   $("topic-title").textContent = topic.title;
   show("topics-view", false);
   show("topic-view", true);
-  await send({ type: "set-active-topic", topicId: topic.id });
   renderPolicy();
-  renderSites(data.hosts);
+  renderSites(loaded.hosts ?? []);
+  void send({ type: "set-active-topic", topicId: topic.id });
   await renderTab();
 }
 
+let promptTimer: number | undefined;
+let promptWrite: Promise<void> = Promise.resolve();
+
 function renderPolicy(): void {
-  paintTerms("include-list", policy.include, (term) => void removeTerm("include", term));
-  paintTerms("exclude-list", policy.exclude, (term) => void removeTerm("exclude", term));
+  const el = $("policy-prompt") as HTMLTextAreaElement;
+  if (document.activeElement !== el) el.value = policy.prompt ?? "";
 }
 
-function paintTerms(elId: string, terms: string[], onRemove: (term: string) => void): void {
-  const ul = $(elId);
-  ul.innerHTML = "";
-  for (const term of terms) {
-    const li = document.createElement("li");
-    li.className = "chip";
-    const span = document.createElement("span");
-    span.textContent = term;
-    const rm = document.createElement("button");
-    rm.className = "danger";
-    rm.textContent = "×";
-    rm.title = `Remove ${term}`;
-    rm.addEventListener("click", () => onRemove(term));
-    li.append(span, rm);
-    ul.appendChild(li);
+function promptText(): string {
+  return ($("policy-prompt") as HTMLTextAreaElement).value;
+}
+
+function scheduleSavePrompt(): void {
+  if (promptTimer) window.clearTimeout(promptTimer);
+  promptTimer = window.setTimeout(() => void savePrompt(), 200);
+}
+
+async function flushPrompt(): Promise<void> {
+  if (promptTimer) {
+    window.clearTimeout(promptTimer);
+    promptTimer = undefined;
   }
+  await savePrompt();
 }
 
-async function addTerm(kind: "include" | "exclude"): Promise<void> {
+async function savePrompt(): Promise<void> {
   if (!topic) return;
-  const input = $(`${kind}-input`) as HTMLInputElement;
-  const term = input.value.trim();
-  if (!term) return;
-  const next = {
-    include: kind === "include" ? uniqueTerms([...policy.include, term]) : policy.include,
-    exclude: kind === "exclude" ? uniqueTerms([...policy.exclude, term]) : policy.exclude,
-  };
-  await savePolicy(next);
-  input.value = "";
+  promptWrite = promptWrite.then(writePrompt, writePrompt);
+  await promptWrite;
 }
 
-async function removeTerm(kind: "include" | "exclude", term: string): Promise<void> {
-  const key = term.toLowerCase();
-  const next = {
-    include: kind === "include" ? policy.include.filter((t) => t.toLowerCase() !== key) : policy.include,
-    exclude: kind === "exclude" ? policy.exclude.filter((t) => t.toLowerCase() !== key) : policy.exclude,
-  };
-  await savePolicy(next);
-}
-
-async function savePolicy(next: Policy): Promise<void> {
+async function writePrompt(): Promise<void> {
   if (!topic) return;
-  const data = await call<{ policy: Policy }>("PUT", `/topics/${topic.id}/policy`, next);
-  policy = data.policy;
-  renderPolicy();
-}
-
-function uniqueTerms(terms: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const t of terms) {
-    const key = t.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(t);
+  const next = promptText();
+  if (next === (policy.prompt ?? "")) return;
+  try {
+    const data = await call<{ policy: Policy }>("PUT", `/topics/${topic.id}/policy`, { prompt: next });
+    policy = data.policy ?? { prompt: next };
+    if (promptText() !== (policy.prompt ?? "")) await writePrompt();
+  } catch (err) {
+    alert((err as Error).message);
   }
-  return out;
 }
 
 function renderSites(hosts: TopicHost[]): void {
@@ -215,6 +199,7 @@ async function loadSites(): Promise<void> {
 
 async function addSite(): Promise<void> {
   if (!topic) return;
+  await flushPrompt();
   const input = $("add-host") as HTMLInputElement;
   const raw = input.value.trim();
   if (!raw) return;
@@ -298,7 +283,7 @@ function paintQueue(): void {
         : "";
     li.innerHTML = `<div class="queue-head">
         <strong>${escapeHtml(f.item_title)}</strong>
-        <span class="badge badge-${escapeHtml(f.state)}">${escapeHtml(f.state)}</span>
+        <span class="badge badge-${escapeHtml(f.state)}">${escapeHtml(stateLabel(f.state))}</span>
       </div>
       ${snip ? `<div class="snippet">${escapeHtml(snip)}</div>` : ""}
       ${link}
@@ -318,24 +303,45 @@ function paintQueue(): void {
   });
 }
 
+function stateLabel(state: string): string {
+  if (state === "queued") return "Queued";
+  if (state === "filed") return "Filed";
+  if (state === "rejected") return "Rejected";
+  return state;
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
-$("create").addEventListener("click", async () => {
-  const title = ($("new-title") as HTMLInputElement).value.trim();
+async function createTopicFromInput(): Promise<void> {
+  const input = $("new-title") as HTMLInputElement;
+  const title = input.value.trim();
   if (!title) return;
-  const data = await call<{ topic: Topic }>("POST", "/topics", { title });
-  ($("new-title") as HTMLInputElement).value = "";
-  tab = "policy";
-  await openTopic(data.topic.id);
+  try {
+    const data = await call<{ topic: Topic; policy?: Policy }>("POST", "/topics", { title });
+    if (!data?.topic?.id) throw new Error("create failed");
+    input.value = "";
+    tab = "policy";
+    await openTopic(data.topic.id, { topic: data.topic, policy: data.policy, hosts: [] });
+  } catch (err) {
+    alert((err as Error).message);
+    await loadTopics().catch(() => undefined);
+  }
+}
+
+$("create").addEventListener("click", () => void createTopicFromInput());
+$("new-title").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void createTopicFromInput();
 });
 
 $("back").addEventListener("click", () => {
-  topic = null;
-  show("topic-view", false);
-  show("topics-view", true);
-  void loadTopics();
+  void flushPrompt().finally(() => {
+    topic = null;
+    show("topic-view", false);
+    show("topics-view", true);
+    void loadTopics();
+  });
 });
 
 $("delete-topic").addEventListener("click", () => {
@@ -357,17 +363,11 @@ $("tabs").addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("button");
   if (!btn?.dataset.tab) return;
   tab = btn.dataset.tab;
-  void renderTab();
+  void flushPrompt().then(() => renderTab());
 });
 
-$("include-add").addEventListener("click", () => void addTerm("include"));
-$("exclude-add").addEventListener("click", () => void addTerm("exclude"));
-$("include-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") void addTerm("include");
-});
-$("exclude-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") void addTerm("exclude");
-});
+$("policy-prompt").addEventListener("input", () => scheduleSavePrompt());
+$("policy-prompt").addEventListener("blur", () => void flushPrompt());
 
 $("show-rejected").addEventListener("change", () => {
   if (tab === "queue") void loadQueue();
@@ -458,6 +458,7 @@ void chrome.windows.getCurrent().then((win) => {
   if (win.id !== undefined) void send({ type: "panel-visibility", windowId: win.id, open: true });
 });
 window.addEventListener("pagehide", () => {
+  void flushPrompt();
   void chrome.windows.getCurrent().then((win) => {
     if (win.id !== undefined) void send({ type: "panel-visibility", windowId: win.id, open: false });
   });
@@ -473,6 +474,7 @@ void (async () => {
   if (connected) await loadTopics().catch(() => undefined);
   window.setInterval(() => {
     void syncHealth().then(onConnectionChange);
+    if (connected && topic && tab === "queue") void loadQueue().catch(() => undefined);
     if (connected && !topic) {
       const prev = currentHost;
       void refreshCurrentHost()

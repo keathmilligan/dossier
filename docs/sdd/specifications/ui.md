@@ -1,8 +1,14 @@
 ---
 feature: ui
+created: 2026-08-24
+updated: 2026-09-02
 ---
 
 # UI
+
+| Created | Updated |
+| --- | --- |
+| 2026-08-24 | 2026-09-02 |
 
 ## Purpose
 
@@ -58,7 +64,7 @@ An open topic SHALL show tabs **Policy**, **Sites**, and **Filings**, with Polic
 
 ### Policy tab
 
-The Policy tab SHALL let the user add and remove include and exclude terms. Each change SHALL apply immediately.
+The Policy tab SHALL be one textarea for the topic prompt. Each edit SHALL apply immediately. An empty prompt SHALL capture nothing.
 
 ### Sites tab
 
@@ -66,8 +72,15 @@ The Sites tab SHALL list the topic's hosts and allow adding a host by name or re
 
 ### Filings tab
 
-The Filings tab SHALL list captured summaries (title, snippet, url, time), newest first. The user SHALL be able to reject a capture. Rejected rows SHALL be hidden unless the user asks to show them. There SHALL NOT be keep, refile, or file-to-section actions.
+The Filings tab SHALL list queued and filed summaries (title, snippet, url, time), newest first. Queued rows SHALL be labeled as queued. The user SHALL be able to reject a capture. Rejected rows SHALL be hidden unless the user asks to show them. There SHALL NOT be keep, refile, or file-to-section actions.
 
 ### Pin
 
 The UI SHALL NOT offer Pin this page, File this page, or Assist Pin.
+
+## Change history
+
+| Date | Change |
+| --- | --- |
+| 2026-08-24 | Side panel topics, include/exclude policy, filings without inbox |
+| 2026-09-02 | Policy textarea; filings show Queued |

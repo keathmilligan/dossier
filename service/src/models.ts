@@ -1,6 +1,7 @@
 export type ItemSource = "watching" | "manual";
-export type FilingState = "filed" | "rejected";
-export const FILING_STATES: FilingState[] = ["filed", "rejected"];
+export type FilingState = "queued" | "filed" | "rejected";
+export const FILING_STATES: FilingState[] = ["queued", "filed", "rejected"];
+export const DEFAULT_QUEUE_STATES: FilingState[] = ["queued", "filed"];
 export const QUEUE_LIMIT = 100;
 
 export interface Topic {
@@ -20,8 +21,7 @@ export interface TopicHost {
 export interface Policy {
   id: string;
   topic_id: string;
-  include: string[];
-  exclude: string[];
+  prompt: string;
   updated_at: string;
 }
 

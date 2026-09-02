@@ -4,7 +4,7 @@ import { badRequest } from "./errors.js";
 import { checkDenylist } from "./denylist.js";
 import { hostOf, normalizeUrl } from "./normalize.js";
 import { newId, nowIso } from "./ids.js";
-import { matchesPolicy } from "./policy.js";
+import { normalizePrompt } from "./policy.js";
 import {
   ensureFiling,
   getItemByNormalized,
@@ -53,7 +53,7 @@ export function ingestCapture(ctx: AppContext, body: CaptureBody): CaptureResult
   }
 
   const urlNormalized = normalizeUrl(body.url);
-  const topics = resolveTopics(ctx, body, urlNormalized, `${body.title ?? ""} ${text}`);
+  const topics = resolveTopics(ctx, body, urlNormalized);
   if (topics.length === 0) {
     logDrop("no_topic");
     return { item: null, filings: [], dropped: true };
@@ -105,14 +105,13 @@ function mergeHighlight(prev: string | null, next: string | null): string | null
   return `${prev}\n${next}`;
 }
 
-function resolveTopics(ctx: AppContext, body: CaptureBody, urlNormalized: string, hay: string): Topic[] {
+function resolveTopics(ctx: AppContext, body: CaptureBody, urlNormalized: string): Topic[] {
   const candidates = body.topic_ids?.length
     ? body.topic_ids.map((id) => getTopic(ctx.db, id)).filter((t): t is Topic => Boolean(t))
     : watchingTopicsForUrl(ctx, urlNormalized);
   return candidates.filter((topic) => {
     const policy = getPolicy(ctx.db, topic.id);
-    if (!policy) return false;
-    return matchesPolicy(body.title ?? "", hay, policy.include, policy.exclude);
+    return Boolean(policy && normalizePrompt(policy.prompt));
   });
 }
 

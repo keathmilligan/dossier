@@ -1,8 +1,8 @@
 import type { AppContext } from "./context.js";
 import type { Policy, Topic, TopicHost } from "./models.js";
-import { badRequest, notFound } from "./errors.js";
+import { badRequest, conflict, notFound } from "./errors.js";
 import { newId, nowIso } from "./ids.js";
-import { normalizeTerms } from "./policy.js";
+import { normalizePrompt } from "./policy.js";
 import {
   addTopicHostRow,
   deleteItem,
@@ -14,9 +14,17 @@ import {
   savePolicy,
 } from "./store.js";
 
+function titleTaken(ctx: AppContext, title: string, exceptId?: string): boolean {
+  const row = exceptId
+    ? ctx.db.prepare("SELECT id FROM topics WHERE lower(title) = lower(?) AND id != ?").get(title, exceptId)
+    : ctx.db.prepare("SELECT id FROM topics WHERE lower(title) = lower(?)").get(title);
+  return Boolean(row);
+}
+
 export function createTopic(ctx: AppContext, title: string): { topic: Topic } {
   const trimmed = title.trim();
   if (!trimmed) throw badRequest("invalid_title");
+  if (titleTaken(ctx, trimmed)) throw conflict("title_taken", "a topic with that name already exists");
   const now = nowIso();
   const topic: Topic = {
     id: newId(),
@@ -35,9 +43,11 @@ export function createTopic(ctx: AppContext, title: string): { topic: Topic } {
 export function patchTopic(ctx: AppContext, id: string, patch: { title?: string }): Topic {
   const topic = getTopic(ctx.db, id);
   if (!topic) throw notFound("topic_not_found");
+  const title = patch.title?.trim() || topic.title;
+  if (titleTaken(ctx, title, id)) throw conflict("title_taken", "a topic with that name already exists");
   const next = {
     ...topic,
-    title: patch.title?.trim() || topic.title,
+    title,
     updated_at: nowIso(),
   };
   ctx.db.prepare("UPDATE topics SET title=@title, updated_at=@updated_at WHERE id=@id").run(next);
@@ -61,16 +71,15 @@ export function deleteTopic(ctx: AppContext, id: string): void {
   ctx.logger.info("topic_deleted", { topic_id: id, title: topic.title });
 }
 
-export function putPolicy(ctx: AppContext, topicId: string, include: unknown, exclude: unknown): Policy {
+export function putPolicy(ctx: AppContext, topicId: string, prompt: unknown): Policy {
   const topic = getTopic(ctx.db, topicId);
   if (!topic) throw notFound("topic_not_found");
-  const policy = savePolicy(ctx.db, topicId, normalizeTerms(include), normalizeTerms(exclude));
+  const policy = savePolicy(ctx.db, topicId, normalizePrompt(prompt));
   ctx.db.prepare("UPDATE topics SET updated_at = ? WHERE id = ?").run(policy.updated_at, topicId);
   ctx.logger.info("policy_updated", {
     topic_id: topicId,
     title: topic.title,
-    include: policy.include.length,
-    exclude: policy.exclude.length,
+    prompt_chars: policy.prompt.length,
   });
   return policy;
 }

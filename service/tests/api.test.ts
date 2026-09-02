@@ -56,8 +56,8 @@ describe("capture_incognito", () => {
   });
 });
 
-describe("capture_match", () => {
-  it("files a watched page that hits include and drops one that does not", () => {
+describe("capture_queue", () => {
+  it("queues a watched page when the prompt is set and drops when it is empty", () => {
     const ctx = makeCtx();
     const { topic } = seedReady(ctx);
 
@@ -69,22 +69,13 @@ describe("capture_match", () => {
     });
     expect(countItems(ctx.db)).toBe(1);
     const kept = ctx.db.prepare("SELECT state FROM filings").get() as { state: string };
-    expect(kept.state).toBe("filed");
+    expect(kept.state).toBe("queued");
 
     ctx.db.prepare("DELETE FROM filings").run();
     ctx.db.prepare("DELETE FROM items").run();
     ctx.db.prepare("DELETE FROM items_fts").run();
 
-    const miss = ingestCapture(ctx, {
-      url: "https://example.com/cooking",
-      title: "cooking",
-      source: "watching",
-      readable_text: "totally unrelated page body about cooking ".repeat(10),
-    });
-    expect(miss.dropped).toBe(true);
-    expect(countItems(ctx.db)).toBe(0);
-
-    putPolicy(ctx, topic.id, [], []);
+    putPolicy(ctx, topic.id, "   ");
     const empty = ingestCapture(ctx, {
       url: "https://example.com/mv3-again",
       title: "Manifest V3 capture notes",
@@ -92,18 +83,6 @@ describe("capture_match", () => {
       readable_text: "implementation notes on Manifest V3 capture ".repeat(10),
     });
     expect(empty.dropped).toBe(true);
-  });
-
-  it("drops a page that hits an exclude term", () => {
-    const ctx = makeCtx();
-    seedReady(ctx, { include: ["Manifest V3"], exclude: ["Recall"] });
-    const miss = ingestCapture(ctx, {
-      url: "https://example.com/recall",
-      title: "Manifest V3 and Microsoft Recall",
-      source: "watching",
-      readable_text: "Manifest V3 capture compared to Microsoft Recall ".repeat(8),
-    });
-    expect(miss.dropped).toBe(true);
     expect(countItems(ctx.db)).toBe(0);
   });
 });
@@ -119,29 +98,39 @@ describe("topic_hosts", () => {
   });
 });
 
+describe("topic_title", () => {
+  it("rejects a duplicate name case-insensitively", async () => {
+    const { app } = makeApp();
+    const first = await api(app, "POST", "/topics", { body: { title: "Local capture" } });
+    expect(first.statusCode).toBe(200);
+    const dup = await api(app, "POST", "/topics", { body: { title: "  LOCAL CAPTURE  " } });
+    expect(dup.statusCode).toBe(409);
+    expect(dup.json().error).toBe("title_taken");
+  });
+});
+
 describe("policy_api", () => {
-  it("creates an empty policy and applies include/exclude immediately", async () => {
+  it("creates an empty policy and applies a prompt immediately", async () => {
     const { app, ctx } = makeApp();
     const created = await api(app, "POST", "/topics", { body: { title: "Local capture" } });
     expect(created.statusCode).toBe(200);
     const topic = created.json().topic as { id: string };
-    expect(created.json().policy).toEqual(expect.objectContaining({ include: [], exclude: [] }));
+    expect(created.json().policy).toEqual(expect.objectContaining({ prompt: "" }));
 
     const put = await api(app, "PUT", `/topics/${topic.id}/policy`, {
-      body: { include: ["  MV3  ", "MV3", "localhost"], exclude: ["Recall"] },
+      body: { prompt: "  Pages about Manifest V3 capture.  " },
     });
     expect(put.statusCode).toBe(200);
-    expect(put.json().policy.include).toEqual(["MV3", "localhost"]);
-    expect(put.json().policy.exclude).toEqual(["Recall"]);
+    expect(put.json().policy.prompt).toBe("Pages about Manifest V3 capture.");
 
     const got = await api(app, "GET", `/topics/${topic.id}`);
-    expect(got.json().policy.include).toEqual(["MV3", "localhost"]);
+    expect(got.json().policy.prompt).toBe("Pages about Manifest V3 capture.");
     expect(listTopicHosts(ctx.db, topic.id)).toEqual([]);
   });
 });
 
 describe("hosts_api", () => {
-  it("adds/lists/removes over HTTP without requiring include terms", async () => {
+  it("adds/lists/removes over HTTP without requiring a prompt", async () => {
     const { app, ctx } = makeApp();
     const { topic } = createTopic(ctx, "Local capture");
 
@@ -169,12 +158,12 @@ describe("hosts_api", () => {
 });
 
 describe("queue_api", () => {
-  it("returns filed items newest-first, hides rejected unless asked, and caps at 100", async () => {
+  it("returns queued and filed newest-first, hides rejected unless asked, and caps at 100", async () => {
     const { app, ctx } = makeApp();
     const { topic } = seedReady(ctx);
 
-    const titles = ["oldest filed", "middle rejected", "newest filed"];
-    const states = ["filed", "rejected", "filed"] as const;
+    const titles = ["oldest filed", "middle rejected", "newest queued"];
+    const states = ["filed", "rejected", "queued"] as const;
     for (let i = 0; i < titles.length; i++) {
       const itemId = newId();
       ctx.db
@@ -198,12 +187,12 @@ describe("queue_api", () => {
     const listed = await api(app, "GET", `/topics/${topic.id}/queue`);
     expect(listed.statusCode).toBe(200);
     const filings = listed.json().filings as Array<{ item_title: string; state: string }>;
-    expect(filings.map((f) => f.item_title)).toEqual(["newest filed", "oldest filed"]);
-    expect(filings.map((f) => f.state)).toEqual(["filed", "filed"]);
+    expect(filings.map((f) => f.item_title)).toEqual(["newest queued", "oldest filed"]);
+    expect(filings.map((f) => f.state)).toEqual(["queued", "filed"]);
 
     const withRejected = await api(app, "GET", `/topics/${topic.id}/queue?include_rejected=1`);
     expect(withRejected.json().filings.map((f: { item_title: string }) => f.item_title)).toEqual([
-      "newest filed",
+      "newest queued",
       "middle rejected",
       "oldest filed",
     ]);
@@ -253,6 +242,7 @@ describe("queue_api", () => {
     const res = await api(app, "POST", `/filings/${filing.id}/verdict`, { body: { action: "reject" } });
     expect(res.statusCode).toBe(200);
     const listed = await api(app, "GET", `/topics/${topic.id}/queue`);
+    expect((listed.json().filings as Array<{ state: string }>).some((f) => f.state === "queued")).toBe(false);
     expect(listed.json().filings).toHaveLength(0);
     expect(() => applyVerdict(ctx, filing.id, "keep")).toThrow(/invalid_action/);
   });
@@ -263,7 +253,7 @@ describe("delete_topic", () => {
     const { app, ctx } = makeApp();
     const { topic } = seedReady(ctx);
     const other = createTopic(ctx, "Other");
-    putPolicy(ctx, other.topic.id, ["Manifest V3"], []);
+    putPolicy(ctx, other.topic.id, "Pages about Manifest V3 capture.");
     ingestCapture(ctx, {
       url: "https://example.com/only-here",
       title: "Only here Manifest V3",
@@ -319,6 +309,7 @@ describe("assist", () => {
       });
     }
     expect(countItems(ctx.db)).toBe(2);
+    ctx.db.prepare("UPDATE filings SET state = 'filed'").run();
 
     const before = countItems(ctx.db);
     const assist = await api(app, "POST", "/assist", {
@@ -339,12 +330,9 @@ describe("assist", () => {
   });
 });
 
-function seedReady(
-  ctx: ReturnType<typeof makeCtx>,
-  opts: { include?: string[]; exclude?: string[] } = {},
-) {
+function seedReady(ctx: ReturnType<typeof makeCtx>, prompt = "Pages about Manifest V3 capture and localhost bridges.") {
   const { topic } = createTopic(ctx, "Local capture");
-  putPolicy(ctx, topic.id, opts.include ?? ["Manifest V3 capture", "localhost bridge"], opts.exclude ?? []);
+  putPolicy(ctx, topic.id, prompt);
   addTopicHost(ctx, topic.id, "example.com");
   return { topic };
 }

@@ -30,7 +30,7 @@
         <ul id="topic-list" class="list"></ul>
         <div class="row">
           <input id="new-title" type="text" placeholder="New topic title" />
-          <button id="create" class="primary">Create</button>
+          <button id="create" type="button" class="primary">Create</button>
         </div>
       </section>
       <section id="topic-view" hidden>
@@ -45,23 +45,8 @@
           <button data-tab="queue" role="tab" aria-selected="false">Filings</button>
         </div>
         <div id="tab-policy">
-          <p class="status">Pages on this topic’s sites are captured when they match include and miss exclude. Changes apply immediately.</p>
-          <div class="policy-block">
-            <h2>Include</h2>
-            <ul id="include-list" class="chip-list"></ul>
-            <div class="row">
-              <input id="include-input" type="text" placeholder="Add a term to include" />
-              <button id="include-add" class="primary">Add</button>
-            </div>
-          </div>
-          <div class="policy-block">
-            <h2>Exclude</h2>
-            <ul id="exclude-list" class="chip-list"></ul>
-            <div class="row">
-              <input id="exclude-input" type="text" placeholder="Add a term to exclude" />
-              <button id="exclude-add" class="primary">Add</button>
-            </div>
-          </div>
+          <p class="status">Describe what belongs in this topic. Pages from its sites are queued until the model accepts or rejects them. Changes apply immediately. An empty prompt captures nothing.</p>
+          <textarea id="policy-prompt" rows="8" placeholder="Pages about Manifest V3 capture and localhost bridges. Skip product marketing."></textarea>
         </div>
         <div id="tab-sites" hidden>
           <p class="status">Sites captured for this topic. Add one you're not currently on, or remove any of them.</p>
@@ -72,7 +57,7 @@
           <ul id="site-list" class="list"></ul>
         </div>
         <div id="tab-queue" hidden>
-          <p class="status">newest first · x or Reject dismisses a capture</p>
+          <p class="status">newest first · Queued until the model decides · x or Reject dismisses</p>
           <label class="chk"><input id="show-rejected" type="checkbox" /> Show rejected</label>
           <ul id="queue" class="list"></ul>
         </div>

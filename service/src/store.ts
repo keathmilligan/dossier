@@ -1,6 +1,6 @@
 import type { Database as Db } from "better-sqlite3";
 import type { Filing, FilingState, Item, Policy, QueueFiling, Topic, TopicHost } from "./models.js";
-import { FILING_STATES, QUEUE_LIMIT } from "./models.js";
+import { DEFAULT_QUEUE_STATES, FILING_STATES, QUEUE_LIMIT } from "./models.js";
 import { newId, nowIso } from "./ids.js";
 import { deleteFts, upsertFts } from "./db.js";
 import { hostAllowedByWatchlist } from "./denylist.js";
@@ -14,41 +14,14 @@ export function listTopics(db: Db): Topic[] {
 }
 
 export function getPolicy(db: Db, topicId: string): Policy | undefined {
-  const row = db.prepare("SELECT * FROM policies WHERE topic_id = ?").get(topicId) as
-    | { id: string; topic_id: string; include_json: string; exclude_json: string; updated_at: string }
-    | undefined;
-  return row ? policyFromRow(row) : undefined;
-}
-
-function policyFromRow(row: {
-  id: string;
-  topic_id: string;
-  include_json: string;
-  exclude_json: string;
-  updated_at: string;
-}): Policy {
-  return {
-    id: row.id,
-    topic_id: row.topic_id,
-    include: parseJsonList(row.include_json),
-    exclude: parseJsonList(row.exclude_json),
-    updated_at: row.updated_at,
-  };
-}
-
-function parseJsonList(raw: string): string[] {
-  try {
-    const v = JSON.parse(raw) as unknown;
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
-  } catch {
-    return [];
-  }
+  const row = db.prepare("SELECT * FROM policies WHERE topic_id = ?").get(topicId) as Policy | undefined;
+  return row;
 }
 
 export function insertEmptyPolicy(db: Db, topicId: string): Policy {
   const now = nowIso();
-  const policy: Policy = { id: newId(), topic_id: topicId, include: [], exclude: [], updated_at: now };
-  db.prepare("INSERT INTO policies(id, topic_id, include_json, exclude_json, updated_at) VALUES (?, ?, '[]', '[]', ?)").run(
+  const policy: Policy = { id: newId(), topic_id: topicId, prompt: "", updated_at: now };
+  db.prepare("INSERT INTO policies(id, topic_id, prompt, updated_at) VALUES (?, ?, '', ?)").run(
     policy.id,
     topicId,
     now,
@@ -56,24 +29,18 @@ export function insertEmptyPolicy(db: Db, topicId: string): Policy {
   return policy;
 }
 
-export function savePolicy(db: Db, topicId: string, include: string[], exclude: string[]): Policy {
+export function savePolicy(db: Db, topicId: string, prompt: string): Policy {
   const now = nowIso();
   const existing = getPolicy(db, topicId);
   if (existing) {
-    db.prepare("UPDATE policies SET include_json = ?, exclude_json = ?, updated_at = ? WHERE topic_id = ?").run(
-      JSON.stringify(include),
-      JSON.stringify(exclude),
-      now,
-      topicId,
-    );
-    return { ...existing, include, exclude, updated_at: now };
+    db.prepare("UPDATE policies SET prompt = ?, updated_at = ? WHERE topic_id = ?").run(prompt, now, topicId);
+    return { ...existing, prompt, updated_at: now };
   }
-  const policy: Policy = { id: newId(), topic_id: topicId, include, exclude, updated_at: now };
-  db.prepare("INSERT INTO policies(id, topic_id, include_json, exclude_json, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  const policy: Policy = { id: newId(), topic_id: topicId, prompt, updated_at: now };
+  db.prepare("INSERT INTO policies(id, topic_id, prompt, updated_at) VALUES (?, ?, ?, ?)").run(
     policy.id,
     topicId,
-    JSON.stringify(include),
-    JSON.stringify(exclude),
+    prompt,
     now,
   );
   return policy;
@@ -109,7 +76,7 @@ export function listQueue(
   includeRejected = false,
 ): QueueFiling[] {
   const cap = Math.min(QUEUE_LIMIT, Math.max(1, limit));
-  const wanted = states && states.length ? states : includeRejected ? FILING_STATES : (["filed"] as FilingState[]);
+  const wanted = states && states.length ? states : includeRejected ? FILING_STATES : DEFAULT_QUEUE_STATES;
   const ph = wanted.map(() => "?").join(",");
   return db
     .prepare(
@@ -199,10 +166,20 @@ export function ensureFiling(db: Db, itemId: string, topicId: string): Filing {
     id: newId(),
     item_id: itemId,
     topic_id: topicId,
-    state: "filed",
+    state: "queued",
   };
   db.prepare("INSERT INTO filings(id, item_id, topic_id, state) VALUES (@id, @item_id, @topic_id, @state)").run(filing);
   return filing;
+}
+
+export function listQueuedFilings(db: Db, limit = 20): Filing[] {
+  return db
+    .prepare("SELECT * FROM filings WHERE state = 'queued' ORDER BY id LIMIT ?")
+    .all(limit) as Filing[];
+}
+
+export function setFilingState(db: Db, filingId: string, state: FilingState): void {
+  db.prepare("UPDATE filings SET state = ? WHERE id = ?").run(state, filingId);
 }
 
 export function listTopicItems(db: Db, topicId: string): Item[] {

@@ -1,6 +1,5 @@
 import type { AppContext } from "./context.js";
 import type { AssistRequest, AssistResponse, Item } from "./models.js";
-import { keywordHits } from "./policy.js";
 import { PROMPT_ASSIST } from "./prompts.js";
 import { getPolicy, getTopic, listTopicItems, listTopics } from "./store.js";
 
@@ -94,8 +93,8 @@ function pickTopic(ctx: AppContext, thread: string): string | null {
   let best: { id: string; score: number } | null = null;
   for (const topic of listTopics(ctx.db)) {
     const policy = getPolicy(ctx.db, topic.id);
-    if (!policy || policy.include.length === 0) continue;
-    const score = keywordHits(thread, policy.include);
+    if (!policy || !policy.prompt.trim()) continue;
+    const score = tokenHits(thread, tokens(`${topic.title} ${policy.prompt}`));
     if (score === 0) continue;
     if (!best || score > best.score) best = { id: topic.id, score };
   }
@@ -122,7 +121,7 @@ function retrieve(ctx: AppContext, topicId: string, thread: string): Retrieved[]
   const scored: Retrieved[] = [];
   for (const item of rows) {
     const hay = `${item.title} ${item.readable_text ?? ""} ${item.highlight_text ?? ""}`;
-    const kw = keywordHits(hay, thread.trim().split(/\s+/).filter((w) => w.length >= 3));
+    const kw = tokenHits(hay, tokens(thread));
     const fts = ftsScores.get(item.id) ?? 0;
     const score = 0.6 * fts + 0.4 * Math.min(1, kw / 4);
     scored.push({
@@ -133,6 +132,22 @@ function retrieve(ctx: AppContext, topicId: string, thread: string): Retrieved[]
   }
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, 8);
+}
+
+function tokens(raw: string): string[] {
+  return raw
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 3);
+}
+
+function tokenHits(haystack: string, terms: string[]): number {
+  const h = haystack.toLowerCase();
+  let n = 0;
+  for (const t of terms) {
+    if (h.includes(t)) n += 1;
+  }
+  return n;
 }
 
 function escapeFts(q: string): string {

@@ -4,6 +4,7 @@ import { openDb, getMeta, setMeta } from "./db.js";
 import { OllamaClient } from "./ollama.js";
 import { buildApp } from "./app.js";
 import { createLogger } from "./logger.js";
+import { startJudgeLoop } from "./judge.js";
 import type { AppContext } from "./context.js";
 
 async function main(): Promise<void> {
@@ -22,10 +23,12 @@ async function main(): Promise<void> {
   const paused = { value: getMeta(db, "paused") === "1" };
   const ctx: AppContext = { db, config, token, llm, paused, logger };
   const app = buildApp(ctx);
+  const stopJudge = startJudgeLoop(ctx);
   const host = bindHost(config.listen);
   const port = config.port;
 
   const close = async () => {
+    stopJudge();
     setMeta(db, "paused", ctx.paused.value ? "1" : "0");
     logger.info("service_stopped");
     await app.close();
